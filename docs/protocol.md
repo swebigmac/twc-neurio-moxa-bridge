@@ -149,10 +149,10 @@ Moxa port:
 
 | Moxa port | Simulated Neurio serial |
 | ---: | --- |
-| 1 | `NEUROMOXA_001` |
-| 2 | `NEUROMOXA_002` |
+| 1 | `NEURIOMOXA001` |
+| 2 | `NEURIOMOXA002` |
 | ... | ... |
-| 16 | `NEUROMOXA_016` |
+| 16 | `NEURIOMOXA016` |
 
 This gives each isolated RS485 link a distinct meter identity and makes future
 port-to-Wall-Connector autodetection possible if the Wall Connector exposes the

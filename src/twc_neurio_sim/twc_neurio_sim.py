@@ -43,7 +43,7 @@ BAUD = 115200
 # for the next Modbus reply.
 CONFIG_PATH = Path("/etc/twc-neurio-sim/values.json")
 ACTIVITY_PATH = Path("/run/twc-neurio-sim/port_activity.json")
-NEURIO_SERIAL_PREFIX = "NEUROMOXA_"
+NEURIO_SERIAL_PREFIX = "NEURIOMOXA"
 
 # Logical mapping for the lab installation.  Moxa exposes physical port 1 as
 # /dev/ttyMXUSB0, physical port 2 as /dev/ttyMXUSB1, and so on.
@@ -97,7 +97,7 @@ def identity_regs_for_port(port_number: int) -> list[int]:
     """Return identity registers with the per-port Neurio serial patched in.
 
     The original accepted identity block has a seven-register serial field at
-    indexes 31..37.  `NEUROMOXA_001` is exactly 13 characters, matching the
+    indexes 31..37.  `NEURIOMOXA001` is exactly 13 characters, matching the
     original VAH4810AB0231 field length with a trailing NUL byte.
     """
     regs = list(IDENTITY_REGS)

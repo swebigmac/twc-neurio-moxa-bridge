@@ -62,7 +62,7 @@ serves the same simulated Neurio identity/current/power values to each one.
 - Shows live Neurio values and browser-side last-hour graphs.
 - Opens all 16 Moxa UPort 1650-16 serial ports by default.
 - Broadcasts a unique simulated Neurio serial per Moxa port:
-  `NEUROMOXA_001` through `NEUROMOXA_016`.
+  `NEURIOMOXA001` through `NEURIOMOXA016`.
 - Shows recent Modbus/RS485 activity per port in the web UI.
 - Shows each Moxa port's current interface configuration from `setserial -g`
   (`RS232`, `RS485 2-wire`, `RS422`, or `RS485 4-wire`).

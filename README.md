@@ -60,6 +60,9 @@ serves the same simulated Neurio identity/current/power values to each one.
 - Scans the local subnet for Wall Connector HTTP APIs.
 - Shows Wall Connector online/offline/charging status.
 - Shows live Neurio values and browser-side last-hour graphs.
+- Opens all 16 Moxa UPort 1650-16 serial ports by default.
+- Can use a Fronius Smart Meter as an impromptu current source for the
+  simulated Neurio values.
 
 ## What It Does Not Do Yet
 
@@ -69,7 +72,7 @@ serves the same simulated Neurio identity/current/power values to each one.
 - It does not guarantee safe operation on all Tesla firmware versions.
 
 The current `Auto` mode selector in the web UI is a placeholder for the next
-control-loop step.  Manual mode is the currently meaningful mode.
+control-loop step.  Manual mode and Fronius mode are currently meaningful.
 
 ## Safety Warning
 
@@ -125,14 +128,15 @@ See [docs/moxa.md](docs/moxa.md) for the full detail.
 The most important Moxa-specific requirement is RS485 2-wire mode:
 
 ```bash
-setserial /dev/ttyMXUSB0 port 0x1
-setserial /dev/ttyMXUSB1 port 0x1
+for i in $(seq 0 15); do
+  setserial /dev/ttyMXUSB$i port 0x1
+done
 ```
 
 Verify:
 
 ```bash
-setserial -g /dev/ttyMXUSB0 /dev/ttyMXUSB1
+setserial -g /dev/ttyMXUSB0 /dev/ttyMXUSB1 /dev/ttyMXUSB15
 ```
 
 Expected:
@@ -140,6 +144,7 @@ Expected:
 ```text
 /dev/ttyMXUSB0, UART: 16550A, Port: 0x0001, IRQ: 0, Flags: low_latency
 /dev/ttyMXUSB1, UART: 16550A, Port: 0x0001, IRQ: 0, Flags: low_latency
+/dev/ttyMXUSB15, UART: 16550A, Port: 0x0001, IRQ: 0, Flags: low_latency
 ```
 
 If the port shows `Port: 0x0000`, it is still RS232 mode and the Wall Connector
@@ -178,6 +183,7 @@ sudo mkdir -p /opt/twc-neurio-sim/web
 sudo cp -a src/twc_neurio_sim/web/server.py /opt/twc-neurio-sim/web/
 sudo cp -a examples/values.json /etc/twc-neurio-sim/values.json
 sudo cp -a examples/known_wall_connectors.json /etc/twc-neurio-sim/known_wall_connectors.json
+sudo cp -a examples/fronius.json /etc/twc-neurio-sim/fronius.json
 sudo chmod +x /opt/twc-neurio-sim/*.py /opt/twc-neurio-sim/web/server.py
 ```
 
@@ -230,6 +236,7 @@ Read current web API values:
 ```bash
 curl -s http://127.0.0.1:8080/api/neurio | jq
 curl -s http://127.0.0.1:8080/api/devices | jq
+curl -s http://127.0.0.1:8080/api/fronius | jq
 ```
 
 Watch serial simulator logs:
@@ -243,15 +250,19 @@ journalctl -u twc-neurio-sim.service -f
 For each additional charger:
 
 1. Wire its RS485 pair to a free Moxa port.
-2. Configure that Moxa port as RS485 2-wire:
+2. Make sure that Moxa port is RS485 2-wire:
 
    ```bash
    setserial /dev/ttyMXUSB2 port 0x1
    ```
 
-3. Start the simulator with an additional `--port` argument, or extend
-   `DEFAULT_PORTS` in `twc_neurio_sim.py`.
-4. Extend the systemd `ExecStartPre` loop so the port is configured at boot.
+3. Use the web UI scan to discover the charger's Wi-Fi API.
+4. If needed, edit `/etc/twc-neurio-sim/known_wall_connectors.json` and set
+   `moxa_port` so the UI shows the charger on the correct physical port.
+
+The default systemd unit and simulator already cover all 16 ports on a
+UPort 1650-16.  Manual `--port` arguments are only needed for unusual adapters
+or custom device names.
 
 Example manual run:
 
@@ -261,6 +272,52 @@ sudo /opt/twc-neurio-sim/twc_neurio_sim.py \
   --port 'WC2=/dev/ttyMXUSB1' \
   --port 'WC3=/dev/ttyMXUSB2'
 ```
+
+## Fronius Smart Meter Mode
+
+The web UI can use a Fronius inverter's open Solar API as an impromptu Neurio
+meter source.  This is useful during development when a physical Neurio meter is
+not installed but a Fronius Smart Meter is already measuring site current.
+
+In the web UI:
+
+1. Open the Fronius Smart Meter panel.
+2. Enter the Fronius inverter IP address.
+3. Enable `Aktiv`.
+4. Select `Fronius` as the Neurio mode.
+
+The server calls:
+
+```text
+http://<fronius-ip>/solar_api/v1/GetMeterRealtimeData.cgi?Scope=System
+```
+
+and writes the returned phase currents/powers to
+`/etc/twc-neurio-sim/values.json`.  The serial simulator then serves those
+values on every Moxa port on the next Wall Connector poll.
+
+Configuration is stored locally in:
+
+```text
+/etc/twc-neurio-sim/fronius.json
+```
+
+Example shape:
+
+```json
+{
+  "enabled": true,
+  "ip": "192.0.2.20",
+  "updated_at": "2026-06-27T14:00:00+02:00"
+}
+```
+
+Important limitation: depending on meter placement, the Fronius Smart Meter may
+include Wall Connector charging current in the measured site load.  Feeding that
+raw value back into the Wall Connector can create a hunting loop where charging
+starts, the measured load rises, and the charger stops again.  Treat Fronius
+mode as a development/debug source until your control algorithm subtracts known
+charger current or otherwise filters the value safely.
 
 ## Observed Wall Connector Behavior
 
@@ -299,6 +356,8 @@ Endpoints:
 | `/api/devices` | GET | Poll known Wall Connectors |
 | `/api/neurio` | GET | Read current simulated values |
 | `/api/neurio` | POST | Write manual simulated values |
+| `/api/fronius` | GET | Read Fronius integration status/live meter values |
+| `/api/fronius` | POST | Configure Fronius Smart Meter integration |
 
 ## Credits
 

@@ -33,8 +33,9 @@ The ports must be configured as RS485 2-wire.  On the Moxa driver this is done
 with `setserial`:
 
 ```bash
-setserial /dev/ttyMXUSB0 port 0x1
-setserial /dev/ttyMXUSB1 port 0x1
+for i in $(seq 0 15); do
+  setserial /dev/ttyMXUSB$i port 0x1
+done
 ```
 
 Moxa's documented values:
@@ -49,7 +50,7 @@ Moxa's documented values:
 Check current mode:
 
 ```bash
-setserial -g /dev/ttyMXUSB0 /dev/ttyMXUSB1
+setserial -g /dev/ttyMXUSB0 /dev/ttyMXUSB1 /dev/ttyMXUSB15
 ```
 
 Known-good output looked like:
@@ -57,6 +58,7 @@ Known-good output looked like:
 ```text
 /dev/ttyMXUSB0, UART: 16550A, Port: 0x0001, IRQ: 0, Flags: low_latency
 /dev/ttyMXUSB1, UART: 16550A, Port: 0x0001, IRQ: 0, Flags: low_latency
+/dev/ttyMXUSB15, UART: 16550A, Port: 0x0001, IRQ: 0, Flags: low_latency
 ```
 
 If the port still reports `Port: 0x0000`, it is still RS232 mode and the Wall
@@ -113,15 +115,12 @@ The simulator service does three important things before opening serial ports:
 
 ```ini
 ExecStartPre=/sbin/modprobe mxuport
-ExecStartPre=/bin/sh -c 'for n in $(seq 1 30); do [ -e /dev/ttyMXUSB0 ] && [ -e /dev/ttyMXUSB1 ] && exit 0; sleep 1; done; exit 1'
-ExecStartPre=/bin/sh -c 'for i in 0 1; do /bin/setserial /dev/ttyMXUSB$i port 0x1; done'
+ExecStartPre=/bin/sh -c 'for n in $(seq 1 30); do ok=1; for i in $(seq 0 15); do [ -e /dev/ttyMXUSB$i ] || ok=0; done; [ "$ok" = "1" ] && exit 0; sleep 1; done; exit 1'
+ExecStartPre=/bin/sh -c 'for i in $(seq 0 15); do /bin/setserial /dev/ttyMXUSB$i port 0x1; done'
 ```
 
-For more than two chargers, extend both:
-
-1. The device wait expression.
-2. The `setserial` loop.
-3. The simulator `--port` arguments, if not using defaults.
+The default service and simulator expect all 16 ports of a UPort 1650-16.  Use
+manual `--port` arguments only for custom device names or a smaller adapter.
 
 ## Troubleshooting
 
@@ -141,7 +140,7 @@ dmesg | grep -Ei 'moxa|mxuport|ttyUSB|ttyMXUSB|decompression|firmware' | tail -n
 Check serial mode:
 
 ```bash
-setserial -g /dev/ttyMXUSB0 /dev/ttyMXUSB1
+setserial -g /dev/ttyMXUSB0 /dev/ttyMXUSB1 /dev/ttyMXUSB15
 ```
 
 Watch simulator logs:

@@ -35,7 +35,10 @@ SCAN_TIMEOUT = 1.2
 MAX_WORKERS = 64
 KNOWN_DEVICES_PATH = "/etc/twc-neurio-sim/known_wall_connectors.json"
 VALUES_PATH = "/etc/twc-neurio-sim/values.json"
+FRONIUS_CONFIG_PATH = "/etc/twc-neurio-sim/fronius.json"
 DEFAULT_VOLTAGE = 230.0
+MOXA_MODEL = "Moxa UPort 1650-16"
+MOXA_PORT_COUNT = 16
 
 def iso_now():
     """Timestamp helper used in API responses and values.json writes."""
@@ -131,6 +134,19 @@ INDEX_HTML = r'''<!doctype html>
     .total-current { color: var(--muted); font-size: 14px; }
     .save-small { border: 0; background: #171a20; color: #fff; border-radius: 6px; height: 40px; padding: 0 14px; font-weight: 700; cursor: pointer; }
     .save-small:disabled { opacity: .55; cursor: default; }
+    .fronius-panel { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 16px; }
+    .fronius-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .fronius-title { font-size: 15px; font-weight: 800; }
+    .fronius-toggle { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-weight: 700; font-size: 13px; }
+    .fronius-toggle input { width: 18px; height: 18px; accent-color: var(--blue); }
+    .fronius-grid { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; }
+    .fronius-ip { height: 38px; border: 1px solid var(--line); border-radius: 6px; padding: 0 10px; font: inherit; background: #fff; min-width: 0; }
+    .fronius-status { grid-column: 1 / -1; color: var(--muted); font-size: 13px; min-height: 19px; }
+    .fronius-status.ok { color: #18820d; }
+    .fronius-status.bad { color: var(--danger); }
+    .fronius-readings { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 4px; }
+    .fronius-reading { background: var(--panel-soft); border-radius: 6px; padding: 8px; font-size: 12px; color: var(--muted); }
+    .fronius-reading b { display: block; color: var(--text); font-size: 15px; margin-bottom: 2px; }
     .history-panel { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 16px; }
     .history-title { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 13px; font-weight: 700; margin-bottom: 10px; }
     .spark-row { display: grid; grid-template-columns: 28px 1fr 48px; gap: 10px; align-items: center; margin-top: 10px; }
@@ -148,13 +164,21 @@ INDEX_HTML = r'''<!doctype html>
     .results { overflow: hidden; }
     .row { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: center; padding: 18px 22px; border-top: 1px solid var(--line); }
     .row:first-child { border-top: 0; }
+    .row.empty-port { grid-template-columns: 1fr auto; padding: 10px 18px; background: #f1f1ef; color: var(--muted); }
+    .row.empty-port .wc-name { color: var(--muted); font-size: 14px; font-weight: 500; }
+    .row.empty-port .port-badge { height: 22px; margin-bottom: 2px; font-size: 12px; font-weight: 600; }
     .wc-name { font-size: 19px; font-weight: 700; }
     .wc-meta { color: var(--muted); margin-top: 3px; }
+    .port-line { color: var(--text); font-weight: 700; margin-top: 4px; }
+    .empty-port .port-line { color: var(--muted); font-size: 12px; font-weight: 400; margin-top: 1px; }
     .metric-strip { display: flex; gap: 18px; color: var(--muted); margin-top: 9px; flex-wrap: wrap; }
     .metric b { color: var(--text); }
+    .port-badge { display: inline-flex; align-items: center; height: 28px; padding: 0 10px; border-radius: 999px; background: #f1f1ef; color: var(--muted); font-size: 13px; font-weight: 800; margin-bottom: 6px; }
     .tag { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px; border-radius: 999px; background: #eff8ed; color: #18820d; font-weight: 700; }
     .tag.offline { background: #f4eeee; color: #9b1c12; }
     .tag.offline .dot { background: var(--danger); box-shadow: 0 0 0 4px rgba(217,48,37,.12); }
+    .tag.empty { height: 28px; background: #e4e4e2; color: #777b82; font-size: 13px; font-weight: 600; }
+    .tag.empty .dot { background: #a9abad; box-shadow: none; }
     .empty { padding: 28px 22px; color: var(--muted); border-top: 1px solid var(--line); }
     .debug { background: #111318; color: #d9dde7; border-radius: var(--radius); overflow: hidden; border: 1px solid #252933; }
     .debug-head { height: 44px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; background: #171a20; font-weight: 700; }
@@ -193,6 +217,7 @@ INDEX_HTML = r'''<!doctype html>
             <select id="neurioMode" class="mode-select" aria-label="Neurio mode">
               <option value="manual">Manuell</option>
               <option value="auto">Auto</option>
+              <option value="fronius">Fronius</option>
             </select>
           </div>
           <div class="neurio-art" aria-hidden="true">
@@ -218,6 +243,22 @@ INDEX_HTML = r'''<!doctype html>
           <div class="neurio-foot">
             <div id="neurioTotal" class="total-current">- A totalt</div>
             <button id="saveNeurioBtn" class="save-small">Sätt ström</button>
+          </div>
+          <div class="fronius-panel">
+            <div class="fronius-head">
+              <div class="fronius-title">Fronius Smart Meter</div>
+              <label class="fronius-toggle"><input id="froniusEnabled" type="checkbox" /> Aktiv</label>
+            </div>
+            <div class="fronius-grid">
+              <input id="froniusIp" class="fronius-ip" placeholder="Fronius IP, t.ex. 192.0.2.20" inputmode="decimal" aria-label="Fronius IP address" />
+              <button id="saveFroniusBtn" class="save-small">Spara</button>
+              <div id="froniusStatus" class="fronius-status">Avstängd</div>
+              <div class="fronius-readings">
+                <div class="fronius-reading"><b id="froniusA1">- A</b><span id="froniusP1">- W</span></div>
+                <div class="fronius-reading"><b id="froniusA2">- A</b><span id="froniusP2">- W</span></div>
+                <div class="fronius-reading"><b id="froniusA3">- A</b><span id="froniusP3">- W</span></div>
+              </div>
+            </div>
           </div>
           <div class="history-panel">
             <div class="history-title"><span>Senaste timmen</span><span id="historyScale">0-32 A</span></div>
@@ -268,8 +309,15 @@ const wireWatts = [document.getElementById('wireWatt1'), document.getElementById
 const sparkCanvases = [document.getElementById('spark1'), document.getElementById('spark2'), document.getElementById('spark3')];
 const sparkValues = [document.getElementById('sparkValue1'), document.getElementById('sparkValue2'), document.getElementById('sparkValue3')];
 const historyScale = document.getElementById('historyScale');
+const froniusEnabled = document.getElementById('froniusEnabled');
+const froniusIp = document.getElementById('froniusIp');
+const saveFroniusBtn = document.getElementById('saveFroniusBtn');
+const froniusStatus = document.getElementById('froniusStatus');
+const froniusAmps = [document.getElementById('froniusA1'), document.getElementById('froniusA2'), document.getElementById('froniusA3')];
+const froniusPowers = [document.getElementById('froniusP1'), document.getElementById('froniusP2'), document.getElementById('froniusP3')];
 let refreshTimer = null;
 let neurioTimer = null;
+let froniusTimer = null;
 let lastDevices = [];
 let editingNeurio = false;
 let neurioHistory = [];
@@ -301,16 +349,47 @@ function statusMeta(d) {
   return parts.length ? `<div class="wc-meta">${parts.join(' · ')}</div>` : '';
 }
 
-function renderDevices(devices) {
-  lastDevices = devices || [];
-  if (!devices.length) {
-    results.innerHTML = '<div class="empty">Inga Wall Connectors hittades på subnetet.</div>';
+function deviceStatusText(d) {
+  if (!d || (!d.occupied && !d.ip)) return 'Tom port';
+  if (d.online === false) return 'Offline';
+  if (d.contactor_closed) return 'Charging';
+  if (d.vehicle_connected) return 'Connected';
+  return 'Online';
+}
+
+function deviceStatusClass(d) {
+  if (!d || (!d.occupied && !d.ip)) return 'empty';
+  return d.online === false ? 'offline' : '';
+}
+
+function renderDevices(portsOrDevices) {
+  lastDevices = portsOrDevices || [];
+  if (!lastDevices.length) {
+    results.innerHTML = '<div class="empty">Inga Moxa-portar kunde visas ännu.</div>';
     return;
   }
-  results.innerHTML = devices.map(d => `
+  results.innerHTML = lastDevices.map(slot => {
+    const d = slot.device || slot;
+    const occupied = Boolean(slot.occupied ?? d.ip);
+    const portLabel = slot.moxa_label || d.moxa_label || (slot.moxa_port ? `Moxa UPort 1650-16:Port${slot.moxa_port}` : 'Moxa UPort 1650-16');
+    const tty = slot.tty || d.tty || (slot.moxa_port ? `/dev/ttyMXUSB${slot.moxa_port - 1}` : '');
+    if (!occupied) {
+      return `
+    <div class="row empty-port">
+      <div>
+        <div class="port-badge">Port ${slot.moxa_port}</div>
+        <div class="wc-name">Ingen laddbox ansluten</div>
+        <div class="port-line">${esc(portLabel)}${tty ? ' · ' + esc(tty) : ''}</div>
+      </div>
+      <div class="tag empty"><span class="dot"></span>Tom port</div>
+    </div>`;
+    }
+    return `
     <div class="row">
       <div>
-        <div class="wc-name">Wall Connector</div>
+        <div class="port-badge">Port ${d.moxa_port || slot.moxa_port || '-'}</div>
+        <div class="wc-name">Wall Connector${d.serial ? ' · ' + esc(d.serial) : ''}</div>
+        <div class="port-line">${d.serial ? esc(d.serial) + ' ansluten till ' : ''}${esc(portLabel)}</div>
         <div class="wc-meta">${esc(d.ip)}${d.version ? ' · firmware ' + esc(d.version) : ''}${d.serial ? ' · ' + esc(d.serial) : ''}</div>
         ${statusMeta(d)}
         <div class="metric-strip">
@@ -319,8 +398,9 @@ function renderDevices(devices) {
           <span class="metric"><b>${fmt(d.session_energy_wh)}</b> Wh session</span>
         </div>
       </div>
-      <div class="tag ${d.online === false ? 'offline' : ''}"><span class="dot"></span>${d.online === false ? 'Offline' : (d.contactor_closed ? 'Charging' : (d.vehicle_connected ? 'Connected' : 'Online'))}</div>
-    </div>`).join('');
+      <div class="tag ${deviceStatusClass(d)}"><span class="dot"></span>${deviceStatusText(d)}</div>
+    </div>`;
+  }).join('');
 }
 
 function fmt(v) {
@@ -436,12 +516,67 @@ async function saveNeurio() {
   }
 }
 
+function renderFronius(data) {
+  froniusEnabled.checked = Boolean(data.enabled);
+  froniusIp.value = data.ip || '';
+  const meter = data.meter || null;
+  froniusStatus.classList.remove('ok', 'bad');
+  if (!data.enabled) {
+    froniusStatus.textContent = 'Avstängd';
+  } else if (data.error) {
+    froniusStatus.textContent = `Fel: ${data.error}`;
+    froniusStatus.classList.add('bad');
+  } else if (meter) {
+    froniusStatus.textContent = `${meter.model || 'Smart Meter'} · ${meter.timestamp || 'live'} · skriver till Neurio`;
+    froniusStatus.classList.add('ok');
+  } else {
+    froniusStatus.textContent = 'Aktiv, väntar på data';
+  }
+  const currents = (meter?.current_a || [null, null, null]).slice(0, 3);
+  const powers = (meter?.power_w || [null, null, null]).slice(0, 3);
+  currents.forEach((value, index) => { if (froniusAmps[index]) froniusAmps[index].textContent = `${fmt(value)} A`; });
+  powers.forEach((value, index) => { if (froniusPowers[index]) froniusPowers[index].textContent = `${fmt(value)} W`; });
+}
+
+async function refreshFronius(silent = true) {
+  try {
+    const res = await fetch(`/api/fronius?_=${Date.now()}`, { cache: 'no-store' });
+    const data = await res.json();
+    renderFronius(data);
+    if (!silent && data.enabled) log(`Fronius: ${data.meter ? data.meter.current_a.slice(0,3).map(fmt).join('/') + ' A' : data.error || 'ingen data'}`);
+  } catch (err) {
+    froniusStatus.textContent = `Fel: ${err.message}`;
+    froniusStatus.classList.add('bad');
+  }
+}
+
+async function saveFronius() {
+  saveFroniusBtn.disabled = true;
+  try {
+    const res = await fetch('/api/fronius', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify({ enabled: froniusEnabled.checked, ip: froniusIp.value.trim() })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'kunde inte spara Fronius-inställning');
+    renderFronius(data);
+    log(`Fronius ${data.enabled ? 'aktiverad' : 'avstängd'} på ${data.ip || '-'}`);
+    refreshNeurio(true);
+  } catch (err) {
+    log(`FEL vid Fronius-sparning: ${err.message}`);
+  } finally {
+    saveFroniusBtn.disabled = false;
+  }
+}
+
 async function refreshDevices(silent = false) {
   if (!silent) scanState.textContent = 'refreshing';
   try {
     const res = await fetch(`/api/devices?_=${Date.now()}`, { cache: 'no-store' });
     const data = await res.json();
-    renderDevices(data.devices || []);
+    renderDevices(data.ports || data.devices || []);
     startAutoRefresh();
     if (!silent) log(`Uppdaterade ${data.devices.length} kända laddboxar på ${data.duration_s}s`);
   } catch (err) {
@@ -468,7 +603,7 @@ async function scan() {
     log(`Subnet: ${data.subnet}`);
     log(`Testade ${data.hosts_scanned} adresser på ${data.duration_s}s`);
     for (const line of data.log) log(line);
-    renderDevices(data.devices || []);
+    renderDevices(data.ports || data.devices || []);
     startAutoRefresh();
   } catch (err) {
     log(`FEL: ${err.message}`);
@@ -486,10 +621,14 @@ phaseInputs.forEach(input => {
 });
 neurioMode.addEventListener('change', () => { saveNeurio(); });
 saveNeurioBtn.addEventListener('click', saveNeurio);
+saveFroniusBtn.addEventListener('click', saveFronius);
+froniusEnabled.addEventListener('change', saveFronius);
 refreshDevices(false);
 refreshNeurio(false);
+refreshFronius(false);
 startAutoRefresh();
 neurioTimer = setInterval(() => refreshNeurio(true), 1000);
+froniusTimer = setInterval(() => refreshFronius(true), 1000);
 </script>
 </body>
 </html>
@@ -569,6 +708,120 @@ def probe_host(ip: str):
         return None, logs, f"{type(exc).__name__}: {exc}"
 
 
+def load_fronius_config():
+    """Load optional Fronius Smart Meter integration settings."""
+    try:
+        with open(FRONIUS_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {"enabled": bool(data.get("enabled", False)), "ip": str(data.get("ip", "")).strip()}
+    except Exception:
+        pass
+    return {"enabled": False, "ip": ""}
+
+
+def save_fronius_config(payload):
+    """Persist Fronius integration settings.
+
+    The IP address is intentionally user-supplied.  The project must not ship
+    with a site-specific private address baked into the public repository.
+    """
+    ip = str(payload.get("ip", "")).strip()
+    enabled = bool(payload.get("enabled", False))
+    if enabled and not ip:
+        raise ValueError("Fronius IP address is required when enabled")
+    if ip:
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            raise ValueError("Fronius IP address is invalid")
+    data = {"enabled": enabled, "ip": ip, "updated_at": iso_now()}
+    Path(FRONIUS_CONFIG_PATH).parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = FRONIUS_CONFIG_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    Path(tmp_path).replace(FRONIUS_CONFIG_PATH)
+    return data
+
+
+def fetch_fronius_meter(ip):
+    """Read the Fronius Open Data Smart Meter endpoint.
+
+    This uses Fronius Solar API v1:
+
+        /solar_api/v1/GetMeterRealtimeData.cgi?Scope=System
+
+    The returned current/power values can be written into the Neurio simulator
+    as an impromptu current source when no physical Neurio meter is available.
+    """
+    url = f"http://{ip}/solar_api/v1/GetMeterRealtimeData.cgi?Scope=System"
+    req = Request(url, headers={"User-Agent": "twc-neurio-control/0.1"})
+    with urlopen(req, timeout=3.0) as resp:
+        body = resp.read(262144)
+    data = json.loads(body.decode("utf-8", errors="replace"))
+    meters = data.get("Body", {}).get("Data", {})
+    if not isinstance(meters, dict) or not meters:
+        raise ValueError("No Fronius meter data returned")
+    meter = None
+    for candidate in meters.values():
+        if isinstance(candidate, dict) and "Current_AC_Phase_1" in candidate:
+            meter = candidate
+            break
+    if meter is None:
+        raise ValueError("No meter with phase currents found")
+    currents = [float(meter.get(f"Current_AC_Phase_{i}", 0.0) or 0.0) for i in (1, 2, 3)]
+    powers = [float(meter.get(f"PowerReal_P_Phase_{i}", currents[i - 1] * DEFAULT_VOLTAGE) or 0.0) for i in (1, 2, 3)]
+    total_current = float(meter.get("Current_AC_Sum", sum(currents)) or sum(currents))
+    total_power = float(meter.get("PowerReal_P_Sum", sum(powers)) or sum(powers))
+    details = meter.get("Details", {}) if isinstance(meter.get("Details"), dict) else {}
+    return {
+        "model": details.get("Model") or "Fronius Smart Meter",
+        "manufacturer": details.get("Manufacturer") or "Fronius",
+        "timestamp": data.get("Head", {}).get("Timestamp"),
+        "current_a": [currents[0], currents[1], currents[2], total_current],
+        "power_w": [powers[0], powers[1], powers[2], total_power, 0.0],
+        "voltage_v": [meter.get("Voltage_AC_Phase_1"), meter.get("Voltage_AC_Phase_2"), meter.get("Voltage_AC_Phase_3")],
+        "raw_power_sum_w": total_power,
+    }
+
+
+def apply_fronius_to_neurio(meter):
+    """Write Fronius Smart Meter readings to the Neurio simulator values file."""
+    data = {
+        "mode": "fronius",
+        "source": "fronius",
+        "current_a": meter["current_a"],
+        "power_w": meter["power_w"],
+        "updated_at": iso_now(),
+    }
+    tmp_path = VALUES_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    Path(tmp_path).replace(VALUES_PATH)
+    return data
+
+
+def get_fronius_status(update_neurio=True):
+    """Return Fronius status and optionally feed live values to Neurio."""
+    config = load_fronius_config()
+    result = {"enabled": config["enabled"], "ip": config["ip"], "meter": None, "error": None}
+    if not config["enabled"]:
+        return result
+    if not config["ip"]:
+        result["error"] = "Fronius IP address is not configured"
+        return result
+    try:
+        meter = fetch_fronius_meter(config["ip"])
+        result["meter"] = meter
+        if update_neurio:
+            apply_fronius_to_neurio(meter)
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
+
 def load_neurio_values():
     """Read the simulator values file and normalize its shape for the UI."""
     try:
@@ -606,8 +859,8 @@ def save_neurio_values(payload):
     when a user changes L1/L2/L3 from the browser.
     """
     mode = payload.get("mode", "manual")
-    if mode not in {"manual", "auto"}:
-        raise ValueError("mode must be manual or auto")
+    if mode not in {"manual", "auto", "fronius"}:
+        raise ValueError("mode must be manual, auto or fronius")
     current_in = payload.get("current_a", [])
     if not isinstance(current_in, list) or len(current_in) < 3:
         raise ValueError("current_a must contain L1, L2 and L3")
@@ -627,12 +880,101 @@ def save_neurio_values(payload):
     return data
 
 
+def moxa_tty(port_number):
+    """Return the Linux device name for a 1-based Moxa physical port."""
+    return f"/dev/ttyMXUSB{port_number - 1}"
+
+
+def moxa_label(port_number):
+    """Return the human-readable Moxa port label shown in the UI."""
+    return f"{MOXA_MODEL}:Port{port_number}"
+
+
+def normalized_moxa_port(value):
+    """Validate a stored Moxa port number and return None if invalid."""
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    return port if 1 <= port <= MOXA_PORT_COUNT else None
+
+
+def device_key(device):
+    """Use the stable Wall Connector serial number when available."""
+    return device.get("serial") or device.get("ip")
+
+
+def with_moxa_metadata(device, port_number):
+    """Attach stable display metadata for one physical Moxa port."""
+    enriched = dict(device)
+    enriched["moxa_port"] = port_number
+    enriched["moxa_model"] = MOXA_MODEL
+    enriched["moxa_label"] = moxa_label(port_number)
+    enriched["tty"] = moxa_tty(port_number)
+    return enriched
+
+
+def assign_moxa_ports(devices):
+    """Attach stable Moxa port metadata to known Wall Connectors.
+
+    The Wall Connector HTTP API reports charger status over Wi-Fi, but it does
+    not know which isolated RS485 port on the Moxa adapter the charger uses.
+    That association is local installation state, persisted as moxa_port in
+    known_wall_connectors.json. Existing mappings win; devices without one get
+    the first free port in list order during bring-up.
+    """
+    used = set()
+    assigned = []
+    for device in devices:
+        port = normalized_moxa_port(device.get("moxa_port"))
+        if port is not None and port not in used:
+            used.add(port)
+            assigned.append(with_moxa_metadata(device, port))
+        else:
+            assigned.append(dict(device))
+
+    next_port = 1
+    completed = []
+    for device in assigned:
+        port = normalized_moxa_port(device.get("moxa_port"))
+        if port is None:
+            while next_port in used and next_port <= MOXA_PORT_COUNT:
+                next_port += 1
+            if next_port <= MOXA_PORT_COUNT:
+                port = next_port
+                used.add(port)
+                next_port += 1
+        completed.append(with_moxa_metadata(device, port) if port is not None else device)
+    return completed
+
+
+def build_moxa_slots(devices):
+    """Return the fixed 16-port Moxa layout consumed by the frontend."""
+    slots = [
+        {
+            "moxa_port": port_number,
+            "moxa_model": MOXA_MODEL,
+            "moxa_label": moxa_label(port_number),
+            "tty": moxa_tty(port_number),
+            "occupied": False,
+        }
+        for port_number in range(1, MOXA_PORT_COUNT + 1)
+    ]
+    for device in assign_moxa_ports(devices):
+        port = normalized_moxa_port(device.get("moxa_port"))
+        if port is None:
+            continue
+        slots[port - 1]["occupied"] = True
+        slots[port - 1]["device"] = device
+    return slots
+
+
 def load_known_devices():
     """Load persisted Wall Connector IP/serial hints."""
     try:
         with open(KNOWN_DEVICES_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, list) else []
+        return assign_moxa_ports(data) if isinstance(data, list) else []
     except Exception:
         return []
 
@@ -641,15 +983,16 @@ def save_known_devices(devices):
     """Persist discovered Wall Connectors without volatile online/status data."""
     try:
         by_serial_or_ip = {}
-        for dev in load_known_devices() + devices:
-            key = dev.get("serial") or dev.get("ip")
+        for dev in assign_moxa_ports(load_known_devices() + devices):
+            key = device_key(dev)
             if not key:
                 continue
             keep = dict(dev)
             keep.pop("online", None)
             by_serial_or_ip[key] = keep
         with open(KNOWN_DEVICES_PATH, "w", encoding="utf-8") as f:
-            json.dump(list(by_serial_or_ip.values()), f, indent=2)
+            json.dump(assign_moxa_ports(list(by_serial_or_ip.values())), f, indent=2)
+            f.write("\n")
     except Exception as exc:
         print(f"Could not save known devices: {exc}")
 
@@ -663,18 +1006,23 @@ def merge_known_devices(found):
     save_known_devices(found)
     merged = []
     seen = set()
-    for dev in found:
-        key = dev.get("serial") or dev.get("ip")
+    known_by_key = {device_key(dev): dev for dev in load_known_devices() if device_key(dev)}
+    for dev in assign_moxa_ports(found):
+        key = device_key(dev)
+        if key in known_by_key:
+            known = dict(known_by_key[key])
+            known.update(dev)
+            dev = known
         seen.add(key)
         merged.append(dev)
     for dev in load_known_devices():
-        key = dev.get("serial") or dev.get("ip")
+        key = device_key(dev)
         if key in seen:
             continue
         offline = dict(dev)
         offline["online"] = False
         merged.append(offline)
-    return merged
+    return assign_moxa_ports(merged)
 
 
 def refresh_known_devices():
@@ -701,10 +1049,12 @@ def refresh_known_devices():
             offline["checked_at"] = iso_now()
             offline["status_error"] = error or "no response"
             refreshed.append(offline)
-    refreshed.sort(key=lambda d: tuple(int(part) for part in d["ip"].split(".")))
+    refreshed = assign_moxa_ports(refreshed)
+    refreshed.sort(key=lambda d: normalized_moxa_port(d.get("moxa_port")) or 999)
     return {
         "duration_s": round(time.time() - started, 2),
         "devices": refreshed,
+        "ports": build_moxa_slots(refreshed),
         "log": logs,
     }
 
@@ -724,12 +1074,14 @@ def scan_subnet(subnet: str):
             if device:
                 devices.append(device)
     devices = merge_known_devices(devices)
-    devices.sort(key=lambda d: tuple(int(part) for part in d["ip"].split(".")))
+    devices = assign_moxa_ports(devices)
+    devices.sort(key=lambda d: normalized_moxa_port(d.get("moxa_port")) or 999)
     return {
         "subnet": str(network),
         "hosts_scanned": len(hosts),
         "duration_s": round(time.time() - started, 2),
         "devices": devices,
+        "ports": build_moxa_slots(devices),
         "log": logs,
     }
 
@@ -758,6 +1110,16 @@ class Handler(BaseHTTPRequestHandler):
                 body = self.rfile.read(length) if length else b"{}"
                 payload = json.loads(body.decode("utf-8"))
                 self.send_json(200, save_neurio_values(payload))
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        if parsed.path == "/api/fronius":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length) if length else b"{}"
+                payload = json.loads(body.decode("utf-8"))
+                save_fronius_config(payload)
+                self.send_json(200, get_fronius_status(update_neurio=True))
             except Exception as exc:
                 self.send_json(400, {"error": str(exc)})
             return
@@ -795,6 +1157,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/neurio":
             self.send_json(200, load_neurio_values())
+            return
+        if parsed.path == "/api/fronius":
+            self.send_json(200, get_fronius_status(update_neurio=True))
             return
         if parsed.path == "/api/status":
             self.send_json(200, {"ok": True, "default_subnet": get_default_subnet()})

@@ -45,8 +45,8 @@ CONFIG_PATH = Path("/etc/twc-neurio-sim/values.json")
 # Logical mapping for the lab installation.  Moxa exposes physical port 1 as
 # /dev/ttyMXUSB0, physical port 2 as /dev/ttyMXUSB1, and so on.
 DEFAULT_PORTS = [
-    ("WC1 / ttyMXUSB0", "/dev/ttyMXUSB0"),
-    ("WC2 / ttyMXUSB1", "/dev/ttyMXUSB1"),
+    (f"Moxa Port {port_number} / ttyMXUSB{port_number - 1}", f"/dev/ttyMXUSB{port_number - 1}")
+    for port_number in range(1, 17)
 ]
 
 # Identity response copied from the known-working Neurio response corpus in
@@ -146,6 +146,26 @@ def valid_crc(frame: bytes) -> bool:
     return len(frame) >= 4 and crc16_modbus(frame[:-2]) == frame[-2:]
 
 
+def find_modbus_request(buffer: bytearray) -> int | None:
+    """Return the offset of the next valid 8-byte Wall Connector request.
+
+    Serial reads are byte streams, not message queues.  In practice a Wall
+    Connector reset can leave a Moxa port buffer shifted by one byte:
+
+        expected: 01 03 00 00 00 01 84 0a
+        shifted:  03 00 00 00 01 84 0a 01
+
+    If we always consume the first eight bytes, that port can stay permanently
+    out of phase and never answer discovery.  Instead, each port scans its own
+    buffer for slave id 1, function 3, and a valid Modbus CRC.
+    """
+    for offset in range(0, len(buffer) - 7):
+        frame = bytes(buffer[offset : offset + 8])
+        if frame[0] == 1 and frame[1] == 3 and valid_crc(frame):
+            return offset
+    return None
+
+
 def response(slave: int, func: int, regs: list[int]) -> bytes:
     """Build a Modbus function-3 response frame from 16-bit register words."""
     body = bytes([slave, func, len(regs) * 2])
@@ -243,6 +263,30 @@ def main() -> int:
                 while len(state.buffer) >= 8:
                     # Every request we have observed is exactly 8 bytes:
                     # slave, function, address hi/lo, count hi/lo, CRC lo/hi.
+                    # Still, reads can begin mid-frame after reset/noise, so
+                    # recover by scanning for the next CRC-valid request.
+                    offset = find_modbus_request(state.buffer)
+                    if offset is None:
+                        if len(state.buffer) > 64:
+                            discarded = bytes(state.buffer[:-7])
+                            del state.buffer[:-7]
+                            logging.warning(
+                                "%s discarded unsynced bytes: %s",
+                                state.label,
+                                binascii.hexlify(discarded, " ").decode(),
+                            )
+                        break
+
+                    if offset:
+                        discarded = bytes(state.buffer[:offset])
+                        del state.buffer[:offset]
+                        logging.warning(
+                            "%s resynced after dropping %d byte(s): %s",
+                            state.label,
+                            offset,
+                            binascii.hexlify(discarded, " ").decode(),
+                        )
+
                     frame = bytes(state.buffer[:8])
                     del state.buffer[:8]
                     reply = make_reply(frame)

@@ -302,6 +302,10 @@ class PortState:
     last_addr: int | None = None
     last_count: int | None = None
     last_rx_hex: str | None = None
+    request_counts_by_addr: dict[str, int] | None = None
+    identity_read_count: int = 0
+    last_identity_at: float | None = None
+    last_identity_serial: str | None = None
 
 
 def port_number_from_path(path: str, fallback: int) -> int:
@@ -342,6 +346,14 @@ def mark_activity(state: PortState, frame: bytes) -> None:
     state.last_addr = (frame[2] << 8) | frame[3]
     state.last_count = (frame[4] << 8) | frame[5]
     state.last_rx_hex = binascii.hexlify(frame, " ").decode()
+    if state.request_counts_by_addr is None:
+        state.request_counts_by_addr = {}
+    addr_key = f"0x{state.last_addr:04x}"
+    state.request_counts_by_addr[addr_key] = state.request_counts_by_addr.get(addr_key, 0) + 1
+    if state.last_addr == 0x0001 and state.last_count == 55:
+        state.identity_read_count += 1
+        state.last_identity_at = state.last_request_at
+        state.last_identity_serial = state.identity_serial
 
 
 def write_activity(ports: list[PortState], force: bool = False) -> None:
@@ -367,6 +379,10 @@ def write_activity(ports: list[PortState], force: bool = False) -> None:
                 "last_addr": state.last_addr,
                 "last_count": state.last_count,
                 "last_rx_hex": state.last_rx_hex,
+                "request_counts_by_addr": state.request_counts_by_addr or {},
+                "identity_read_count": state.identity_read_count,
+                "last_identity_at": state.last_identity_at,
+                "last_identity_serial": state.last_identity_serial,
             }
             for state in sorted(ports, key=lambda item: item.port_number)
         ],

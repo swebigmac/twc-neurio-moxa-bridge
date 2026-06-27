@@ -377,6 +377,7 @@ function activityText(slot) {
   if (activity.request_count) bits.push(`${activity.request_count} Modbus-frågor`);
   const seen = fmtTime(activity.last_request_at_ms);
   if (seen) bits.push(`senast ${seen}`);
+  if (activity.identity_read_count) bits.push(`identity ${activity.identity_read_count}x: ${esc(activity.last_identity_serial || '-')}`);
   return bits.length ? `<div class="port-activity">${bits.join(' · ')}</div>` : '';
 }
 
@@ -1108,6 +1109,8 @@ def load_port_activity():
         enriched = dict(item)
         enriched["rs485_active"] = active
         enriched["last_request_at_ms"] = int(float(last_request_at) * 1000) if isinstance(last_request_at, (int, float)) else None
+        last_identity_at = item.get("last_identity_at")
+        enriched["last_identity_at_ms"] = int(float(last_identity_at) * 1000) if isinstance(last_identity_at, (int, float)) else None
         activity[port] = enriched
     return activity
 

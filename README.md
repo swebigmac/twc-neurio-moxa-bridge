@@ -64,6 +64,8 @@ serves the same simulated Neurio identity/current/power values to each one.
 - Broadcasts a unique simulated Neurio serial per Moxa port:
   `NEUROMOXA_001` through `NEUROMOXA_016`.
 - Shows recent Modbus/RS485 activity per port in the web UI.
+- Shows each Moxa port's current interface configuration from `setserial -g`
+  (`RS232`, `RS485 2-wire`, `RS422`, or `RS485 4-wire`).
 - Lets the operator save a human-friendly Wall Connector name on the charger
   serial number, not on the Moxa port.
 - Can use a Fronius Smart Meter as an impromptu current source for the

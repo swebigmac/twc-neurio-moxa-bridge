@@ -47,6 +47,14 @@ Moxa's documented values:
 | `0x2` | RS422 |
 | `0x3` | RS485 4-wire |
 
+The web UI reads `setserial -g` for all 16 `/dev/ttyMXUSB*` devices and shows
+the current interface mode per port.  A correctly configured Wall Connector
+port should show:
+
+```text
+Aktuell konfiguration: RS485 2-wire (0x1)
+```
+
 Check current mode:
 
 ```bash

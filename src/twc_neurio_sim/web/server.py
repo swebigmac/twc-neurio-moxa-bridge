@@ -41,6 +41,14 @@ DEFAULT_VOLTAGE = 230.0
 MOXA_MODEL = "Moxa UPort 1650-16"
 MOXA_PORT_COUNT = 16
 PORT_ACTIVE_WINDOW_S = 10
+SERIAL_CONFIG_CACHE_S = 5
+SERIAL_INTERFACE_LABELS = {
+    0x0: "RS232",
+    0x1: "RS485 2-wire",
+    0x2: "RS422",
+    0x3: "RS485 4-wire",
+}
+_serial_config_cache = {"expires_at": 0.0, "ports": {}}
 
 def iso_now():
     """Timestamp helper used in API responses and values.json writes."""
@@ -176,6 +184,8 @@ INDEX_HTML = r'''<!doctype html>
     .empty-port .port-line { color: var(--muted); font-size: 12px; font-weight: 400; margin-top: 1px; }
     .device-name-input { width: min(260px, 100%); height: 34px; margin-top: 8px; border: 1px solid var(--line); border-radius: 6px; padding: 0 9px; font: inherit; font-size: 14px; background: #fff; }
     .port-activity { color: var(--muted); font-size: 12px; margin-top: 5px; }
+    .port-config { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .port-config.bad { color: var(--danger); font-weight: 700; }
     .metric-strip { display: flex; gap: 18px; color: var(--muted); margin-top: 9px; flex-wrap: wrap; }
     .metric b { color: var(--text); }
     .port-badge { display: inline-flex; align-items: center; height: 28px; padding: 0 10px; border-radius: 999px; background: #f1f1ef; color: var(--muted); font-size: 13px; font-weight: 800; margin-bottom: 6px; }
@@ -366,6 +376,12 @@ function activityText(slot) {
   return bits.length ? `<div class="port-activity">${bits.join(' · ')}</div>` : '';
 }
 
+function serialConfigText(slot) {
+  const config = slot.serial_config || {};
+  const text = config.text || 'Okänd';
+  return `<div class="port-config ${config.ok === false ? 'bad' : ''}">Aktuell konfiguration: ${esc(text)}</div>`;
+}
+
 function deviceStatusText(d) {
   if (!d || (!d.occupied && !d.ip)) return 'Tom port';
   if (d.online === false) return 'Offline';
@@ -401,6 +417,7 @@ function renderDevices(portsOrDevices) {
         <div class="port-badge">Port ${slot.moxa_port}</div>
         <div class="wc-name">${active ? 'RS485-trafik utan mappad laddbox' : 'Ingen laddbox ansluten'}</div>
         <div class="port-line">${esc(portLabel)}${tty ? ' · ' + esc(tty) : ''}</div>
+        ${serialConfigText(slot)}
         ${activityText(slot)}
       </div>
       <div class="tag ${active ? 'rs485' : 'empty'}"><span class="dot"></span>${active ? 'RS485 aktiv' : 'Tom port'}</div>
@@ -414,6 +431,7 @@ function renderDevices(portsOrDevices) {
         <div class="port-badge">Port ${d.moxa_port || slot.moxa_port || '-'}</div>
         <div class="wc-name">${displayTitle}${d.serial ? ' · ' + esc(d.serial) : ''}</div>
         <div class="port-line">${d.serial ? esc(d.serial) + ' ansluten till ' : ''}${esc(portLabel)}</div>
+        ${serialConfigText(slot)}
         <div class="wc-meta">${esc(d.ip)}${d.version ? ' · firmware ' + esc(d.version) : ''}${d.serial ? ' · ' + esc(d.serial) : ''}</div>
         ${statusMeta(d)}
         ${activityText(slot)}
@@ -945,6 +963,64 @@ def moxa_label(port_number):
     return f"{MOXA_MODEL}:Port{port_number}"
 
 
+def parse_setserial_line(line):
+    """Parse one `setserial -g` line into interface metadata."""
+    path = line.split(",", 1)[0].strip()
+    port_number = None
+    if path.startswith("/dev/ttyMXUSB"):
+        try:
+            port_number = int(path.rsplit("ttyMXUSB", 1)[1]) + 1
+        except (IndexError, ValueError):
+            port_number = None
+    marker = "Port: "
+    raw_value = None
+    if marker in line:
+        raw = line.split(marker, 1)[1].split(",", 1)[0].strip()
+        try:
+            raw_value = int(raw, 16)
+        except ValueError:
+            raw_value = None
+    if port_number is None:
+        return None, None
+    label = SERIAL_INTERFACE_LABELS.get(raw_value, "Okänd")
+    return port_number, {
+        "raw": f"0x{raw_value:x}" if raw_value is not None else None,
+        "label": label,
+        "text": f"{label} (0x{raw_value:x})" if raw_value is not None else "Okänd",
+        "ok": raw_value == 0x1,
+    }
+
+
+def load_serial_configs():
+    """Read Moxa interface mode for every port via setserial.
+
+    Moxa's Linux driver overloads the `setserial port` value to mean interface
+    type: 0x0 RS232, 0x1 RS485 2-wire, 0x2 RS422, 0x3 RS485 4-wire.
+    """
+    now = time.time()
+    if _serial_config_cache["expires_at"] > now:
+        return _serial_config_cache["ports"]
+    paths = [moxa_tty(port_number) for port_number in range(1, MOXA_PORT_COUNT + 1)]
+    configs = {}
+    try:
+        output = subprocess.check_output(["setserial", "-g", *paths], text=True, stderr=subprocess.STDOUT, timeout=2.0)
+        for line in output.splitlines():
+            port_number, config = parse_setserial_line(line)
+            if port_number is not None and config:
+                configs[port_number] = config
+    except Exception as exc:
+        for port_number in range(1, MOXA_PORT_COUNT + 1):
+            configs[port_number] = {
+                "raw": None,
+                "label": "Okänd",
+                "text": f"Kunde inte läsa setserial: {exc}",
+                "ok": False,
+            }
+    _serial_config_cache["expires_at"] = now + SERIAL_CONFIG_CACHE_S
+    _serial_config_cache["ports"] = configs
+    return configs
+
+
 def normalized_moxa_port(value):
     """Validate a stored Moxa port number and return None if invalid."""
     try:
@@ -1028,12 +1104,19 @@ def assign_moxa_ports(devices):
 def build_moxa_slots(devices):
     """Return the fixed 16-port Moxa layout consumed by the frontend."""
     activity = load_port_activity()
+    serial_configs = load_serial_configs()
     slots = [
         {
             "moxa_port": port_number,
             "moxa_model": MOXA_MODEL,
             "moxa_label": moxa_label(port_number),
             "tty": moxa_tty(port_number),
+            "serial_config": serial_configs.get(port_number, {
+                "raw": None,
+                "label": "Okänd",
+                "text": "Okänd",
+                "ok": False,
+            }),
             "identity_serial": activity.get(port_number, {}).get("identity_serial"),
             "activity": activity.get(port_number, {}),
             "rs485_active": bool(activity.get(port_number, {}).get("rs485_active")),

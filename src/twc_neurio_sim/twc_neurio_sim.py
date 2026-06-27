@@ -22,6 +22,7 @@ import argparse
 import binascii
 import json
 import logging
+import re
 import signal
 import struct
 import sys
@@ -41,6 +42,8 @@ BAUD = 115200
 # this JSON file; the serial loop notices the mtime change and uses the values
 # for the next Modbus reply.
 CONFIG_PATH = Path("/etc/twc-neurio-sim/values.json")
+ACTIVITY_PATH = Path("/run/twc-neurio-sim/port_activity.json")
+NEURIO_SERIAL_PREFIX = "NEUROMOXA_"
 
 # Logical mapping for the lab installation.  Moxa exposes physical port 1 as
 # /dev/ttyMXUSB0, physical port 2 as /dev/ttyMXUSB1, and so on.
@@ -49,9 +52,9 @@ DEFAULT_PORTS = [
     for port_number in range(1, 17)
 ]
 
-# Identity response copied from the known-working Neurio response corpus in
+# Identity response template copied from the known-working Neurio response corpus in
 # frankenbubble/twc3-modbus.  It contains a model/firmware-ish string, a meter
-# id ("90954"), the serial number VAH4810AB0231, and a MAC-like string.
+# id ("90954"), a serial number field, and a MAC-like string.
 # The Wall Connector uses this during "Remote Meter" discovery/configuration.
 IDENTITY_REGS = [
     0x3078, 0x3030, 0x3030, 0x3034, 0x3731, 0x3442, 0x3035, 0x3638,
@@ -75,6 +78,31 @@ DEFAULT_CURRENT_FLOATS = [1.0979, 3.7791, 0.4527, 0.0245]
 
 _last_config_mtime = None
 _cached_values = None
+_last_activity_write = 0.0
+
+
+def text_to_regs(text: str, register_count: int) -> list[int]:
+    """Encode an ASCII-ish identity field into fixed-width Modbus registers."""
+    raw = text.encode("ascii")[: register_count * 2]
+    raw = raw.ljust(register_count * 2, b"\x00")
+    return [(raw[i] << 8) | raw[i + 1] for i in range(0, len(raw), 2)]
+
+
+def identity_serial_for_port(port_number: int) -> str:
+    """Return the unique simulated Neurio serial for one Moxa physical port."""
+    return f"{NEURIO_SERIAL_PREFIX}{port_number:03d}"
+
+
+def identity_regs_for_port(port_number: int) -> list[int]:
+    """Return identity registers with the per-port Neurio serial patched in.
+
+    The original accepted identity block has a seven-register serial field at
+    indexes 31..37.  `NEUROMOXA_001` is exactly 13 characters, matching the
+    original VAH4810AB0231 field length with a trailing NUL byte.
+    """
+    regs = list(IDENTITY_REGS)
+    regs[31:38] = text_to_regs(identity_serial_for_port(port_number), 7)
+    return regs
 
 
 def floats_to_regs(values: list[float]) -> list[int]:
@@ -174,7 +202,7 @@ def response(slave: int, func: int, regs: list[int]) -> bytes:
     return body + crc16_modbus(body)
 
 
-def make_reply(frame: bytes) -> bytes | None:
+def make_reply(frame: bytes, identity_regs: list[int]) -> bytes | None:
     """Return the simulator reply for one 8-byte Modbus RTU request.
 
     The Wall Connector requests observed so far are all function-code 3
@@ -195,9 +223,9 @@ def make_reply(frame: bytes) -> bytes | None:
     if addr == 0x9C42 and count == 6:
         return response(slave, func, HANDSHAKE_REGS)
     if addr == 0x0001 and count == 55:
-        return response(slave, func, IDENTITY_REGS)
+        return response(slave, func, identity_regs)
     if addr == 0x0000 and count == 1:
-        return response(slave, func, [IDENTITY_REGS[0]])
+        return response(slave, func, [identity_regs[0]])
 
     power_regs, current_regs = load_values()
     if addr == 0x0088 and count == 10:
@@ -211,23 +239,92 @@ def make_reply(frame: bytes) -> bytes | None:
 class PortState:
     label: str
     path: str
+    port_number: int
+    identity_serial: str
+    identity_regs: list[int]
     ser: serial.Serial
     buffer: bytearray
+    request_count: int = 0
+    last_request_at: float | None = None
+    last_addr: int | None = None
+    last_count: int | None = None
+    last_rx_hex: str | None = None
+
+
+def port_number_from_path(path: str, fallback: int) -> int:
+    match = re.search(r"ttyMXUSB(\d+)$", path)
+    if match:
+        return int(match.group(1)) + 1
+    return fallback
 
 
 def open_ports(port_specs: list[str]) -> list[PortState]:
     """Open every configured serial device in non-blocking mode."""
     ports = []
-    for spec in port_specs:
+    for index, spec in enumerate(port_specs, start=1):
         if "=" in spec:
             label, path = spec.split("=", 1)
         else:
             path = spec
             label = path.rsplit("/", 1)[-1]
+        port_number = port_number_from_path(path, index)
+        identity_serial = identity_serial_for_port(port_number)
         ser = serial.Serial(path, BAUD, bytesize=8, parity="N", stopbits=1, timeout=0)
-        ports.append(PortState(label=label, path=path, ser=ser, buffer=bytearray()))
-        logging.info("Listening/responding on %s (%s) @ %s 8N1", label, path, BAUD)
+        ports.append(PortState(
+            label=label,
+            path=path,
+            port_number=port_number,
+            identity_serial=identity_serial,
+            identity_regs=identity_regs_for_port(port_number),
+            ser=ser,
+            buffer=bytearray(),
+        ))
+        logging.info("Listening/responding on %s (%s) @ %s 8N1 as %s", label, path, BAUD, identity_serial)
     return ports
+
+
+def mark_activity(state: PortState, frame: bytes) -> None:
+    state.request_count += 1
+    state.last_request_at = time.time()
+    state.last_addr = (frame[2] << 8) | frame[3]
+    state.last_count = (frame[4] << 8) | frame[5]
+    state.last_rx_hex = binascii.hexlify(frame, " ").decode()
+
+
+def write_activity(ports: list[PortState], force: bool = False) -> None:
+    """Write lightweight per-port activity for the web UI.
+
+    This is intentionally best-effort.  Serial replies must keep working even if
+    `/run` is temporarily unavailable.
+    """
+    global _last_activity_write
+    now = time.time()
+    if not force and now - _last_activity_write < 0.5:
+        return
+    _last_activity_write = now
+    payload = {
+        "updated_at": now,
+        "ports": [
+            {
+                "moxa_port": state.port_number,
+                "tty": state.path,
+                "identity_serial": state.identity_serial,
+                "request_count": state.request_count,
+                "last_request_at": state.last_request_at,
+                "last_addr": state.last_addr,
+                "last_count": state.last_count,
+                "last_rx_hex": state.last_rx_hex,
+            }
+            for state in sorted(ports, key=lambda item: item.port_number)
+        ],
+    }
+    try:
+        ACTIVITY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = ACTIVITY_PATH.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2) + "\n")
+        tmp_path.replace(ACTIVITY_PATH)
+    except Exception as exc:
+        logging.debug("Could not write %s: %s", ACTIVITY_PATH, exc)
 
 
 def main() -> int:
@@ -239,6 +336,7 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     port_specs = args.port or [f"{label}={path}" for label, path in DEFAULT_PORTS]
     ports = open_ports(port_specs)
+    write_activity(ports, force=True)
     running = True
 
     def stop(_signum, _frame):
@@ -289,10 +387,12 @@ def main() -> int:
 
                     frame = bytes(state.buffer[:8])
                     del state.buffer[:8]
-                    reply = make_reply(frame)
+                    reply = make_reply(frame, state.identity_regs)
                     frame_hex = binascii.hexlify(frame, " ").decode()
 
                     if reply:
+                        mark_activity(state, frame)
+                        write_activity(ports)
                         state.ser.write(reply)
                         state.ser.flush()
                         if not args.quiet:

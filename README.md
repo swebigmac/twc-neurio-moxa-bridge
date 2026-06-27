@@ -61,6 +61,11 @@ serves the same simulated Neurio identity/current/power values to each one.
 - Shows Wall Connector online/offline/charging status.
 - Shows live Neurio values and browser-side last-hour graphs.
 - Opens all 16 Moxa UPort 1650-16 serial ports by default.
+- Broadcasts a unique simulated Neurio serial per Moxa port:
+  `NEUROMOXA_001` through `NEUROMOXA_016`.
+- Shows recent Modbus/RS485 activity per port in the web UI.
+- Lets the operator save a human-friendly Wall Connector name on the charger
+  serial number, not on the Moxa port.
 - Can use a Fronius Smart Meter as an impromptu current source for the
   simulated Neurio values.
 
@@ -358,6 +363,12 @@ Endpoints:
 | `/api/neurio` | POST | Write manual simulated values |
 | `/api/fronius` | GET | Read Fronius integration status/live meter values |
 | `/api/fronius` | POST | Configure Fronius Smart Meter integration |
+| `/api/device-name` | POST | Save a human-friendly Wall Connector name |
+
+The web UI reads `/run/twc-neurio-sim/port_activity.json`, which is written by
+the serial simulator.  This lets the UI show which physical Moxa ports are
+currently being polled over RS485 even before a Wall Connector has been mapped
+to that port.
 
 ## Credits
 

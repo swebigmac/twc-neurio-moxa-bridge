@@ -36,9 +36,11 @@ MAX_WORKERS = 64
 KNOWN_DEVICES_PATH = "/etc/twc-neurio-sim/known_wall_connectors.json"
 VALUES_PATH = "/etc/twc-neurio-sim/values.json"
 FRONIUS_CONFIG_PATH = "/etc/twc-neurio-sim/fronius.json"
+PORT_ACTIVITY_PATH = "/run/twc-neurio-sim/port_activity.json"
 DEFAULT_VOLTAGE = 230.0
 MOXA_MODEL = "Moxa UPort 1650-16"
 MOXA_PORT_COUNT = 16
+PORT_ACTIVE_WINDOW_S = 10
 
 def iso_now():
     """Timestamp helper used in API responses and values.json writes."""
@@ -167,10 +169,13 @@ INDEX_HTML = r'''<!doctype html>
     .row.empty-port { grid-template-columns: 1fr auto; padding: 10px 18px; background: #f1f1ef; color: var(--muted); }
     .row.empty-port .wc-name { color: var(--muted); font-size: 14px; font-weight: 500; }
     .row.empty-port .port-badge { height: 22px; margin-bottom: 2px; font-size: 12px; font-weight: 600; }
+    .row.rs485-active { background: #f7fbf5; }
     .wc-name { font-size: 19px; font-weight: 700; }
     .wc-meta { color: var(--muted); margin-top: 3px; }
     .port-line { color: var(--text); font-weight: 700; margin-top: 4px; }
     .empty-port .port-line { color: var(--muted); font-size: 12px; font-weight: 400; margin-top: 1px; }
+    .device-name-input { width: min(260px, 100%); height: 34px; margin-top: 8px; border: 1px solid var(--line); border-radius: 6px; padding: 0 9px; font: inherit; font-size: 14px; background: #fff; }
+    .port-activity { color: var(--muted); font-size: 12px; margin-top: 5px; }
     .metric-strip { display: flex; gap: 18px; color: var(--muted); margin-top: 9px; flex-wrap: wrap; }
     .metric b { color: var(--text); }
     .port-badge { display: inline-flex; align-items: center; height: 28px; padding: 0 10px; border-radius: 999px; background: #f1f1ef; color: var(--muted); font-size: 13px; font-weight: 800; margin-bottom: 6px; }
@@ -179,6 +184,8 @@ INDEX_HTML = r'''<!doctype html>
     .tag.offline .dot { background: var(--danger); box-shadow: 0 0 0 4px rgba(217,48,37,.12); }
     .tag.empty { height: 28px; background: #e4e4e2; color: #777b82; font-size: 13px; font-weight: 600; }
     .tag.empty .dot { background: #a9abad; box-shadow: none; }
+    .tag.rs485 { background: #eff8ed; color: #18820d; }
+    .tag.rs485 .dot { background: var(--green); box-shadow: 0 0 0 4px rgba(18,189,0,.13); }
     .empty { padding: 28px 22px; color: var(--muted); border-top: 1px solid var(--line); }
     .debug { background: #111318; color: #d9dde7; border-radius: var(--radius); overflow: hidden; border: 1px solid #252933; }
     .debug-head { height: 44px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; background: #171a20; font-weight: 700; }
@@ -349,6 +356,16 @@ function statusMeta(d) {
   return parts.length ? `<div class="wc-meta">${parts.join(' · ')}</div>` : '';
 }
 
+function activityText(slot) {
+  const activity = slot.activity || {};
+  const bits = [];
+  if (slot.identity_serial) bits.push(`Neurio ${esc(slot.identity_serial)}`);
+  if (activity.request_count) bits.push(`${activity.request_count} Modbus-frågor`);
+  const seen = fmtTime(activity.last_request_at_ms);
+  if (seen) bits.push(`senast ${seen}`);
+  return bits.length ? `<div class="port-activity">${bits.join(' · ')}</div>` : '';
+}
+
 function deviceStatusText(d) {
   if (!d || (!d.occupied && !d.ip)) return 'Tom port';
   if (d.online === false) return 'Offline';
@@ -373,25 +390,34 @@ function renderDevices(portsOrDevices) {
     const occupied = Boolean(slot.occupied ?? d.ip);
     const portLabel = slot.moxa_label || d.moxa_label || (slot.moxa_port ? `Moxa UPort 1650-16:Port${slot.moxa_port}` : 'Moxa UPort 1650-16');
     const tty = slot.tty || d.tty || (slot.moxa_port ? `/dev/ttyMXUSB${slot.moxa_port - 1}` : '');
+    const active = Boolean(slot.rs485_active);
+    const rowClasses = ['row'];
+    if (!occupied) rowClasses.push('empty-port');
+    if (active) rowClasses.push('rs485-active');
     if (!occupied) {
       return `
-    <div class="row empty-port">
+    <div class="${rowClasses.join(' ')}">
       <div>
         <div class="port-badge">Port ${slot.moxa_port}</div>
-        <div class="wc-name">Ingen laddbox ansluten</div>
+        <div class="wc-name">${active ? 'RS485-trafik utan mappad laddbox' : 'Ingen laddbox ansluten'}</div>
         <div class="port-line">${esc(portLabel)}${tty ? ' · ' + esc(tty) : ''}</div>
+        ${activityText(slot)}
       </div>
-      <div class="tag empty"><span class="dot"></span>Tom port</div>
+      <div class="tag ${active ? 'rs485' : 'empty'}"><span class="dot"></span>${active ? 'RS485 aktiv' : 'Tom port'}</div>
     </div>`;
     }
+    const displayName = d.display_name || '';
+    const displayTitle = displayName ? esc(displayName) : 'Wall Connector';
     return `
-    <div class="row">
+    <div class="${rowClasses.join(' ')}">
       <div>
         <div class="port-badge">Port ${d.moxa_port || slot.moxa_port || '-'}</div>
-        <div class="wc-name">Wall Connector${d.serial ? ' · ' + esc(d.serial) : ''}</div>
+        <div class="wc-name">${displayTitle}${d.serial ? ' · ' + esc(d.serial) : ''}</div>
         <div class="port-line">${d.serial ? esc(d.serial) + ' ansluten till ' : ''}${esc(portLabel)}</div>
         <div class="wc-meta">${esc(d.ip)}${d.version ? ' · firmware ' + esc(d.version) : ''}${d.serial ? ' · ' + esc(d.serial) : ''}</div>
         ${statusMeta(d)}
+        ${activityText(slot)}
+        <input class="device-name-input" data-device-key="${esc(d.serial || d.ip || '')}" value="${esc(displayName)}" placeholder="Eget namn, t.ex. Gården 2" />
         <div class="metric-strip">
           <span class="metric"><b>${fmt(d.vehicle_current_a)}</b> A vehicle</span>
           <span class="metric"><b>${fmt(d.currentA_a)}</b>/<b>${fmt(d.currentB_a)}</b>/<b>${fmt(d.currentC_a)}</b> A</span>
@@ -401,6 +427,33 @@ function renderDevices(portsOrDevices) {
       <div class="tag ${deviceStatusClass(d)}"><span class="dot"></span>${deviceStatusText(d)}</div>
     </div>`;
   }).join('');
+  bindDeviceNameInputs();
+}
+
+function bindDeviceNameInputs() {
+  document.querySelectorAll('.device-name-input').forEach(input => {
+    input.addEventListener('keydown', event => { if (event.key === 'Enter') input.blur(); });
+    input.addEventListener('change', () => saveDeviceName(input));
+  });
+}
+
+async function saveDeviceName(input) {
+  const key = input.dataset.deviceKey;
+  if (!key) return;
+  try {
+    const res = await fetch('/api/device-name', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify({ key, display_name: input.value.trim() })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'kunde inte spara namn');
+    renderDevices(data.ports || data.devices || []);
+    log(`Sparade namn för ${key}`);
+  } catch (err) {
+    log(`FEL vid namnsparning: ${err.message}`);
+  }
 }
 
 function fmt(v) {
@@ -576,7 +629,9 @@ async function refreshDevices(silent = false) {
   try {
     const res = await fetch(`/api/devices?_=${Date.now()}`, { cache: 'no-store' });
     const data = await res.json();
-    renderDevices(data.ports || data.devices || []);
+    if (!document.activeElement?.classList?.contains('device-name-input')) {
+      renderDevices(data.ports || data.devices || []);
+    }
     startAutoRefresh();
     if (!silent) log(`Uppdaterade ${data.devices.length} kända laddboxar på ${data.duration_s}s`);
   } catch (err) {
@@ -899,6 +954,28 @@ def normalized_moxa_port(value):
     return port if 1 <= port <= MOXA_PORT_COUNT else None
 
 
+def load_port_activity():
+    """Load best-effort Modbus activity emitted by the serial simulator."""
+    try:
+        with open(PORT_ACTIVITY_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+    activity = {}
+    now = time.time()
+    for item in data.get("ports", []) if isinstance(data, dict) else []:
+        port = normalized_moxa_port(item.get("moxa_port"))
+        if port is None:
+            continue
+        last_request_at = item.get("last_request_at")
+        active = isinstance(last_request_at, (int, float)) and now - float(last_request_at) <= PORT_ACTIVE_WINDOW_S
+        enriched = dict(item)
+        enriched["rs485_active"] = active
+        enriched["last_request_at_ms"] = int(float(last_request_at) * 1000) if isinstance(last_request_at, (int, float)) else None
+        activity[port] = enriched
+    return activity
+
+
 def device_key(device):
     """Use the stable Wall Connector serial number when available."""
     return device.get("serial") or device.get("ip")
@@ -950,12 +1027,16 @@ def assign_moxa_ports(devices):
 
 def build_moxa_slots(devices):
     """Return the fixed 16-port Moxa layout consumed by the frontend."""
+    activity = load_port_activity()
     slots = [
         {
             "moxa_port": port_number,
             "moxa_model": MOXA_MODEL,
             "moxa_label": moxa_label(port_number),
             "tty": moxa_tty(port_number),
+            "identity_serial": activity.get(port_number, {}).get("identity_serial"),
+            "activity": activity.get(port_number, {}),
+            "rs485_active": bool(activity.get(port_number, {}).get("rs485_active")),
             "occupied": False,
         }
         for port_number in range(1, MOXA_PORT_COUNT + 1)
@@ -967,6 +1048,28 @@ def build_moxa_slots(devices):
         slots[port - 1]["occupied"] = True
         slots[port - 1]["device"] = device
     return slots
+
+
+def save_device_name(payload):
+    """Persist a human-friendly name on the Wall Connector identity, not port."""
+    key = str(payload.get("key", "")).strip()
+    display_name = str(payload.get("display_name", "")).strip()[:80]
+    if not key:
+        raise ValueError("device key is required")
+    devices = load_known_devices()
+    updated = False
+    for device in devices:
+        if device_key(device) == key:
+            if display_name:
+                device["display_name"] = display_name
+            else:
+                device.pop("display_name", None)
+            updated = True
+    if not updated:
+        raise ValueError("device was not found")
+    save_known_devices(devices)
+    refreshed = refresh_known_devices()
+    return refreshed
 
 
 def load_known_devices():
@@ -1120,6 +1223,15 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(body.decode("utf-8"))
                 save_fronius_config(payload)
                 self.send_json(200, get_fronius_status(update_neurio=True))
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        if parsed.path == "/api/device-name":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length) if length else b"{}"
+                payload = json.loads(body.decode("utf-8"))
+                self.send_json(200, save_device_name(payload))
             except Exception as exc:
                 self.send_json(400, {"error": str(exc)})
             return

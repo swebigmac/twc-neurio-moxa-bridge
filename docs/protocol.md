@@ -112,7 +112,7 @@ Observed request:
 01 03 00 01 00 37 55 d4
 ```
 
-Static response contains 55 Modbus registers.  The current simulator uses:
+Response contains 55 Modbus registers.  The simulator starts from this template:
 
 ```text
 0x3078 0x3030 0x3030 0x3034 0x3731 0x3442 0x3035 0x3638
@@ -132,10 +132,10 @@ Human-readable fields visible in this block:
 | Mid block | `1.6.1-Tesla` | Firmware/vendor-ish string |
 | Mid block | `012.0020A.H` | Exact semantic unknown |
 | Mid block | `90954` | Meter id shown in Tesla One |
-| Serial block | `VAH4810AB0231` | Emulator identity serial confirmed in Tesla One |
+| Serial block | `VAH4810AB0231` in the original template | Patched per Moxa port by the simulator |
 | Tail block | `04:71:4B:05:68:61` | MAC-like identifier |
 
-Important: Tesla One showed the simulated remote meter serial number as:
+Important: Tesla One showed the original simulated remote meter serial number as:
 
 ```text
 VAH4810AB0231
@@ -143,6 +143,20 @@ VAH4810AB0231
 
 That confirmed this identity response is accepted by Wall Connector firmware
 `26.18.0`.
+
+For multi-port operation the simulator now patches the serial field per physical
+Moxa port:
+
+| Moxa port | Simulated Neurio serial |
+| ---: | --- |
+| 1 | `NEUROMOXA_001` |
+| 2 | `NEUROMOXA_002` |
+| ... | ... |
+| 16 | `NEUROMOXA_016` |
+
+This gives each isolated RS485 link a distinct meter identity and makes future
+port-to-Wall-Connector autodetection possible if the Wall Connector exposes the
+configured remote-meter identity through any API or observable behavior.
 
 ## Register `0x0000`, Count 1: Identity Probe
 

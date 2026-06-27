@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "twc-neurio-moxa-bridge"
+version = "0.1.0"
+description = "Tesla Wall Connector Gen 3 Neurio/Generac Modbus RTU simulator for Moxa UPort adapters"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [
+  { name = "swebigmac" }
+]
+dependencies = [
+  "pyserial>=3.5"
+]
+
+[project.scripts]
+twc-neurio-sim = "twc_neurio_sim.twc_neurio_sim:main"

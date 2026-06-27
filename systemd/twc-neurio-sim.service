@@ -1,0 +1,27 @@
+[Unit]
+Description=Tesla Wall Connector Neurio simulator on Moxa UPort
+After=multi-user.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=simple
+
+# Load the Moxa UPort kernel driver.  On the tested Debian 13 host this module
+# was installed from Moxa's Kernel 6.x driver package.
+ExecStartPre=/sbin/modprobe mxuport
+
+# Wait until the first two Moxa serial devices exist.  Physical Moxa port 1 is
+# /dev/ttyMXUSB0, physical port 2 is /dev/ttyMXUSB1.
+ExecStartPre=/bin/sh -c 'for n in $(seq 1 30); do [ -e /dev/ttyMXUSB0 ] && [ -e /dev/ttyMXUSB1 ] && exit 0; sleep 1; done; exit 1'
+
+# Critical Moxa-specific step: set each port to RS485 2-wire mode.  Without
+# this, setserial reports Port: 0x0000 (RS232) and the Wall Connector traffic
+# appears dead.
+ExecStartPre=/bin/sh -c 'for i in 0 1; do /bin/setserial /dev/ttyMXUSB$i port 0x1; done'
+
+ExecStart=/opt/twc-neurio-sim/twc_neurio_sim.py --quiet
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=TWC Neurio Control Web UI
+After=network-online.target twc-neurio-sim.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Standard-library HTTP UI.  It reads/writes /etc/twc-neurio-sim/values.json,
+# which is also watched by the serial simulator.
+ExecStart=/opt/twc-neurio-sim/web/server.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

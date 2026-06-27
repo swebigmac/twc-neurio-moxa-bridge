@@ -37,6 +37,8 @@ KNOWN_DEVICES_PATH = "/etc/twc-neurio-sim/known_wall_connectors.json"
 VALUES_PATH = "/etc/twc-neurio-sim/values.json"
 IDENTIFY_PATH = "/etc/twc-neurio-sim/identify.json"
 FRONIUS_CONFIG_PATH = "/etc/twc-neurio-sim/fronius.json"
+CONTROL_CONFIG_PATH = "/etc/twc-neurio-sim/control.json"
+CONTROL_STATE_PATH = "/run/twc-neurio-sim/control_state.json"
 PORT_ACTIVITY_PATH = "/run/twc-neurio-sim/port_activity.json"
 DEFAULT_VOLTAGE = 230.0
 DEFAULT_IDENTIFY_DURATION_S = 8
@@ -51,6 +53,17 @@ SERIAL_INTERFACE_LABELS = {
     0x3: "RS485 4-wire",
 }
 _serial_config_cache = {"expires_at": 0.0, "ports": {}}
+DEFAULT_CONTROL_CONFIG = {
+    "main_fuse_a": 25.0,
+    "slow_overload_pct": 100.0,
+    "medium_overload_pct": 110.0,
+    "fast_overload_pct": 120.0,
+    "slow_response_s": 600.0,
+    "medium_response_s": 10.0,
+    "fast_response_s": 1.0,
+    "recovery_s": 120.0,
+    "noise_floor_a": 0.3,
+}
 
 def iso_now():
     """Timestamp helper used in API responses and values.json writes."""
@@ -159,6 +172,19 @@ INDEX_HTML = r'''<!doctype html>
     .fronius-readings { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 4px; }
     .fronius-reading { background: var(--panel-soft); border-radius: 6px; padding: 8px; font-size: 12px; color: var(--muted); }
     .fronius-reading b { display: block; color: var(--text); font-size: 15px; margin-bottom: 2px; }
+    .control-panel { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 16px; }
+    .control-title { font-size: 15px; font-weight: 800; margin-bottom: 10px; }
+    .control-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .control-field { display: grid; gap: 4px; color: var(--muted); font-size: 12px; font-weight: 700; }
+    .control-field input { height: 36px; border: 1px solid var(--line); border-radius: 6px; padding: 0 9px; font: inherit; background: #fff; min-width: 0; }
+    .control-wide { grid-column: 1 / -1; }
+    .control-status { grid-column: 1 / -1; color: var(--muted); font-size: 13px; min-height: 19px; }
+    .control-status.ok { color: #18820d; }
+    .control-status.warn { color: #a35a00; }
+    .control-status.bad { color: var(--danger); }
+    .control-metrics { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 4px; }
+    .control-metric { background: var(--panel-soft); border-radius: 6px; padding: 8px; font-size: 12px; color: var(--muted); }
+    .control-metric b { display: block; color: var(--text); font-size: 15px; margin-bottom: 2px; }
     .history-panel { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 16px; }
     .history-title { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 13px; font-weight: 700; margin-bottom: 10px; }
     .spark-row { display: grid; grid-template-columns: 28px 1fr 48px; gap: 10px; align-items: center; margin-top: 10px; }
@@ -281,6 +307,26 @@ INDEX_HTML = r'''<!doctype html>
               </div>
             </div>
           </div>
+          <div class="control-panel">
+            <div class="control-title">Automatisk lastreglering</div>
+            <div class="control-grid">
+              <label class="control-field">Huvudsäkring (A)<input id="mainFuseA" type="number" min="1" max="400" step="1" /></label>
+              <button id="saveControlBtn" class="save-small">Spara</button>
+              <label class="control-field">Långsam gräns (%)<input id="slowPct" type="number" min="50" max="200" step="0.1" /></label>
+              <label class="control-field">Långsam tid (s)<input id="slowSeconds" type="number" min="1" max="7200" step="1" /></label>
+              <label class="control-field">Mellan gräns (%)<input id="mediumPct" type="number" min="50" max="250" step="0.1" /></label>
+              <label class="control-field">Mellan tid (s)<input id="mediumSeconds" type="number" min="1" max="600" step="1" /></label>
+              <label class="control-field">Snabb gräns (%)<input id="fastPct" type="number" min="50" max="300" step="0.1" /></label>
+              <label class="control-field">Snabb tid (s)<input id="fastSeconds" type="number" min="0.2" max="60" step="0.1" /></label>
+              <label class="control-field control-wide">Återgångstid (s)<input id="recoverySeconds" type="number" min="1" max="1800" step="1" /></label>
+              <div id="controlStatus" class="control-status">Auto-läge ej aktivt</div>
+              <div class="control-metrics">
+                <div class="control-metric"><b id="controlLoadPct">- %</b><span>högsta fas</span></div>
+                <div class="control-metric"><b id="controlBaseLoad">- A</b><span>huslast utan laddning</span></div>
+                <div class="control-metric"><b id="controlPenalty">- A</b><span>regulatorpådrag</span></div>
+              </div>
+            </div>
+          </div>
           <div class="history-panel">
             <div class="history-title"><span>Senaste timmen</span><span id="historyScale">0-32 A</span></div>
             <div class="spark-row"><span class="spark-label">L1</span><canvas id="spark1" width="260" height="44"></canvas><span id="sparkValue1" class="spark-value">- A</span></div>
@@ -336,9 +382,25 @@ const saveFroniusBtn = document.getElementById('saveFroniusBtn');
 const froniusStatus = document.getElementById('froniusStatus');
 const froniusAmps = [document.getElementById('froniusA1'), document.getElementById('froniusA2'), document.getElementById('froniusA3')];
 const froniusPowers = [document.getElementById('froniusP1'), document.getElementById('froniusP2'), document.getElementById('froniusP3')];
+const saveControlBtn = document.getElementById('saveControlBtn');
+const controlStatus = document.getElementById('controlStatus');
+const controlInputs = {
+  main_fuse_a: document.getElementById('mainFuseA'),
+  slow_overload_pct: document.getElementById('slowPct'),
+  slow_response_s: document.getElementById('slowSeconds'),
+  medium_overload_pct: document.getElementById('mediumPct'),
+  medium_response_s: document.getElementById('mediumSeconds'),
+  fast_overload_pct: document.getElementById('fastPct'),
+  fast_response_s: document.getElementById('fastSeconds'),
+  recovery_s: document.getElementById('recoverySeconds')
+};
+const controlLoadPct = document.getElementById('controlLoadPct');
+const controlBaseLoad = document.getElementById('controlBaseLoad');
+const controlPenalty = document.getElementById('controlPenalty');
 let refreshTimer = null;
 let neurioTimer = null;
 let froniusTimer = null;
+let controlTimer = null;
 let lastDevices = [];
 let editingNeurio = false;
 let neurioHistory = [];
@@ -617,6 +679,61 @@ function renderFronius(data) {
   powers.forEach((value, index) => { if (froniusPowers[index]) froniusPowers[index].textContent = `${fmt(value)} W`; });
 }
 
+function renderControl(data) {
+  const cfg = data.config || {};
+  Object.entries(controlInputs).forEach(([key, input]) => {
+    if (document.activeElement !== input && cfg[key] !== undefined) input.value = fmt(Number(cfg[key]));
+  });
+  const state = data.state || {};
+  controlStatus.classList.remove('ok', 'warn', 'bad');
+  if (state.error) {
+    controlStatus.textContent = `Fel: ${state.error}`;
+    controlStatus.classList.add('bad');
+  } else if (state.active) {
+    const band = state.band || 'normal';
+    controlStatus.textContent = `Aktiv · ${band} · skriver syntetisk Neurio-last`;
+    controlStatus.classList.add(band === 'normal' ? 'ok' : 'warn');
+  } else {
+    controlStatus.textContent = state.reason || 'Auto-läge ej aktivt';
+  }
+  controlLoadPct.textContent = `${fmt(state.max_load_pct)} %`;
+  controlBaseLoad.textContent = `${(state.base_load_a || []).slice(0,3).map(fmt).join('/')} A`;
+  controlPenalty.textContent = `${(state.penalty_a || []).slice(0,3).map(fmt).join('/')} A`;
+}
+
+async function refreshControl(silent = true) {
+  try {
+    const res = await fetch(`/api/control?_=${Date.now()}`, { cache: 'no-store' });
+    const data = await res.json();
+    renderControl(data);
+    if (!silent && data.state?.active) log(`Regulator: ${fmt(data.state.max_load_pct)}% · ${data.state.band}`);
+  } catch (err) {
+    if (!silent) log(`FEL vid regulatoruppdatering: ${err.message}`);
+  }
+}
+
+async function saveControl() {
+  saveControlBtn.disabled = true;
+  const payload = {};
+  Object.entries(controlInputs).forEach(([key, input]) => { payload[key] = Number(input.value); });
+  try {
+    const res = await fetch('/api/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'kunde inte spara regulatorinställningar');
+    renderControl(data);
+    log(`Sparade regulator: huvudsäkring ${fmt(data.config.main_fuse_a)} A`);
+  } catch (err) {
+    log(`FEL vid regulatorsparning: ${err.message}`);
+  } finally {
+    saveControlBtn.disabled = false;
+  }
+}
+
 async function refreshFronius(silent = true) {
   try {
     const res = await fetch(`/api/fronius?_=${Date.now()}`, { cache: 'no-store' });
@@ -704,12 +821,15 @@ neurioMode.addEventListener('change', () => { saveNeurio(); });
 saveNeurioBtn.addEventListener('click', saveNeurio);
 saveFroniusBtn.addEventListener('click', saveFronius);
 froniusEnabled.addEventListener('change', saveFronius);
+saveControlBtn.addEventListener('click', saveControl);
 refreshDevices(false);
 refreshNeurio(false);
 refreshFronius(false);
+refreshControl(false);
 startAutoRefresh();
 neurioTimer = setInterval(() => refreshNeurio(true), 1000);
 froniusTimer = setInterval(() => refreshFronius(true), 1000);
+controlTimer = setInterval(() => refreshControl(true), 2000);
 </script>
 </body>
 </html>
@@ -826,6 +946,76 @@ def save_fronius_config(payload):
     return data
 
 
+def load_control_config():
+    """Load fuse/regulator settings used by Auto mode."""
+    config = dict(DEFAULT_CONTROL_CONFIG)
+    try:
+        with open(CONTROL_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            for key in config:
+                if key in data:
+                    config[key] = float(data[key])
+    except Exception:
+        pass
+    return config
+
+
+def save_control_config(payload):
+    """Persist regulator settings with bounded numeric values.
+
+    Overload thresholds are exact comparisons against percentages.  Anything
+    strictly greater than 100.0 % enters the slow overload band, so there is no
+    dead zone between 100.001 % and 100.999 %.
+    """
+    current = load_control_config()
+    for key in DEFAULT_CONTROL_CONFIG:
+        if key in payload:
+            current[key] = float(payload[key])
+    if current["main_fuse_a"] <= 0:
+        raise ValueError("main_fuse_a must be greater than zero")
+    if not (0 < current["slow_overload_pct"] < current["medium_overload_pct"] < current["fast_overload_pct"]):
+        raise ValueError("overload thresholds must be increasing")
+    for key in ("slow_response_s", "medium_response_s", "fast_response_s", "recovery_s"):
+        if current[key] <= 0:
+            raise ValueError(f"{key} must be greater than zero")
+    if current["noise_floor_a"] < 0:
+        raise ValueError("noise_floor_a must not be negative")
+    data = {**current, "updated_at": iso_now()}
+    Path(CONTROL_CONFIG_PATH).parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = CONTROL_CONFIG_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    Path(tmp_path).replace(CONTROL_CONFIG_PATH)
+    return data
+
+
+def load_control_state():
+    """Load the last regulator state so ramping survives HTTP requests."""
+    try:
+        with open(CONTROL_STATE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_control_state(state):
+    """Persist live regulator state under /run for UI/debug visibility."""
+    try:
+        Path(CONTROL_STATE_PATH).parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = CONTROL_STATE_PATH + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+            f.write("\n")
+        Path(tmp_path).replace(CONTROL_STATE_PATH)
+    except Exception as exc:
+        print(f"Could not save control state: {exc}")
+
+
 def fetch_fronius_meter(ip):
     """Read the Fronius Open Data Smart Meter endpoint.
 
@@ -867,6 +1057,16 @@ def fetch_fronius_meter(ip):
     }
 
 
+def write_neurio_values(data):
+    """Atomically write the simulator values file used by the Modbus process."""
+    tmp_path = VALUES_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    Path(tmp_path).replace(VALUES_PATH)
+    return data
+
+
 def apply_fronius_to_neurio(meter):
     """Write Fronius Smart Meter readings to the Neurio simulator values file."""
     data = {
@@ -876,12 +1076,142 @@ def apply_fronius_to_neurio(meter):
         "power_w": meter["power_w"],
         "updated_at": iso_now(),
     }
-    tmp_path = VALUES_PATH + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-    Path(tmp_path).replace(VALUES_PATH)
-    return data
+    return write_neurio_values(data)
+
+
+def phase_currents_from_device(device):
+    """Return measured Wall Connector output current per phase."""
+    phases = []
+    for key in ("currentA_a", "currentB_a", "currentC_a"):
+        try:
+            phases.append(max(0.0, float(device.get(key, 0.0) or 0.0)))
+        except (TypeError, ValueError):
+            phases.append(0.0)
+    return phases
+
+
+def poll_charger_currents():
+    """Poll known Wall Connectors and sum their live phase currents."""
+    known = [dev for dev in load_known_devices() if dev.get("ip")]
+    totals = [0.0, 0.0, 0.0]
+    devices = []
+    if not known:
+        return totals, devices
+    with ThreadPoolExecutor(max_workers=min(8, len(known))) as executor:
+        futures = {executor.submit(probe_host, dev["ip"]): dev for dev in known}
+        for future in as_completed(futures):
+            fallback = futures[future]
+            device, _logs, _error = future.result()
+            if not device:
+                devices.append({"ip": fallback.get("ip"), "online": False})
+                continue
+            phases = phase_currents_from_device(device)
+            for index in range(3):
+                totals[index] += phases[index]
+            devices.append({
+                "ip": device.get("ip"),
+                "serial": device.get("serial"),
+                "online": True,
+                "contactor_closed": device.get("contactor_closed"),
+                "vehicle_connected": device.get("vehicle_connected"),
+                "phase_current_a": phases,
+            })
+    return totals, devices
+
+
+def response_time_for_load(load_pct, config):
+    """Return overload band and requested response time for a load percentage."""
+    if load_pct > config["fast_overload_pct"]:
+        return "fast", config["fast_response_s"]
+    if load_pct > config["medium_overload_pct"]:
+        return "medium", config["medium_response_s"]
+    if load_pct > config["slow_overload_pct"]:
+        return "slow", config["slow_response_s"]
+    return "normal", config["recovery_s"]
+
+
+def ramp_value(current, target, dt_s, response_s):
+    """Move one value toward a target using a first-order time constant."""
+    if response_s <= 0:
+        return target
+    factor = max(0.0, min(1.0, dt_s / response_s))
+    return current + (target - current) * factor
+
+
+def apply_auto_control_to_neurio(meter):
+    """Run the first practical anti-hunting regulator and write Neurio values."""
+    config = load_control_config()
+    now = time.time()
+    previous = load_control_state()
+    previous_time = float(previous.get("timestamp", now) or now)
+    dt_s = max(0.1, min(30.0, now - previous_time))
+
+    site_current = [max(0.0, float(value or 0.0)) for value in meter["current_a"][:3]]
+    charger_current, chargers = poll_charger_currents()
+    base_load = [max(0.0, site_current[i] - charger_current[i]) for i in range(3)]
+    fuse = max(1.0, float(config["main_fuse_a"]))
+    load_pct = [(site_current[i] / fuse) * 100.0 for i in range(3)]
+    previous_penalty = previous.get("penalty_a") if isinstance(previous.get("penalty_a"), list) else [0.0, 0.0, 0.0]
+    penalty = []
+    bands = []
+
+    for index in range(3):
+        previous_value = float(previous_penalty[index] if index < len(previous_penalty) else 0.0)
+        target = max(0.0, site_current[index] - fuse)
+        if target < config["noise_floor_a"]:
+            target = 0.0
+        band, response_s = response_time_for_load(load_pct[index], config)
+        if target <= previous_value:
+            response_s = config["recovery_s"]
+        penalty.append(ramp_value(previous_value, target, dt_s, response_s))
+        bands.append(band)
+
+    synthetic = [base_load[i] + penalty[i] for i in range(3)]
+    total = sum(synthetic)
+    state = {
+        "active": True,
+        "timestamp": now,
+        "updated_at": iso_now(),
+        "band": max(bands, key=lambda name: {"normal": 0, "slow": 1, "medium": 2, "fast": 3}[name]),
+        "main_fuse_a": fuse,
+        "site_current_a": site_current,
+        "charger_current_a": charger_current,
+        "base_load_a": base_load,
+        "penalty_a": penalty,
+        "synthetic_current_a": [synthetic[0], synthetic[1], synthetic[2], total],
+        "max_load_pct": max(load_pct),
+        "load_pct": load_pct,
+        "chargers": chargers,
+    }
+    save_control_state(state)
+    return write_neurio_values({
+        "mode": "auto",
+        "source": "fronius-auto",
+        "current_a": state["synthetic_current_a"],
+        "power_w": [
+            synthetic[0] * DEFAULT_VOLTAGE,
+            synthetic[1] * DEFAULT_VOLTAGE,
+            synthetic[2] * DEFAULT_VOLTAGE,
+            total * DEFAULT_VOLTAGE,
+            0.0,
+        ],
+        "controller": state,
+        "updated_at": iso_now(),
+    })
+
+
+def control_status():
+    """Return saved control config and most recent regulator state."""
+    config = load_control_config()
+    mode = load_neurio_values().get("mode", "manual")
+    state = load_control_state()
+    if mode != "auto":
+        state = {"active": False, "reason": "Välj Auto-läge för att aktivera regulatorn", "mode": mode}
+    elif not state:
+        state = {"active": False, "reason": "Auto-läge väntar på Fronius-data", "mode": mode}
+    else:
+        state["mode"] = mode
+    return {"config": config, "state": state}
 
 
 def get_fronius_status(update_neurio=True):
@@ -897,7 +1227,12 @@ def get_fronius_status(update_neurio=True):
         meter = fetch_fronius_meter(config["ip"])
         result["meter"] = meter
         if update_neurio:
-            apply_fronius_to_neurio(meter)
+            mode = load_neurio_values().get("mode", "manual")
+            if mode == "auto":
+                apply_auto_control_to_neurio(meter)
+                result["control"] = control_status()["state"]
+            elif mode == "fronius":
+                apply_fronius_to_neurio(meter)
     except Exception as exc:
         result["error"] = str(exc)
     return result
@@ -1372,6 +1707,16 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self.send_json(400, {"error": str(exc)})
             return
+        if parsed.path == "/api/control":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length) if length else b"{}"
+                payload = json.loads(body.decode("utf-8"))
+                save_control_config(payload)
+                self.send_json(200, control_status())
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
         if parsed.path == "/api/device-name":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1427,6 +1772,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/fronius":
             self.send_json(200, get_fronius_status(update_neurio=True))
+            return
+        if parsed.path == "/api/control":
+            self.send_json(200, control_status())
             return
         if parsed.path == "/api/status":
             self.send_json(200, {"ok": True, "default_subnet": get_default_subnet()})

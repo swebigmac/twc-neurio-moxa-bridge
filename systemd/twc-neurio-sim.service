@@ -1,7 +1,6 @@
 [Unit]
 Description=Tesla Wall Connector Neurio simulator on Moxa UPort
-After=multi-user.target systemd-udev-settle.service
-Wants=systemd-udev-settle.service
+After=systemd-modules-load.service systemd-udev-trigger.service
 
 [Service]
 Type=simple
@@ -12,12 +11,15 @@ ExecStartPre=/sbin/modprobe mxuport
 
 # Wait until all 16 Moxa serial devices exist.  Physical Moxa port 1 is
 # /dev/ttyMXUSB0, physical port 16 is /dev/ttyMXUSB15.
-ExecStartPre=/bin/sh -c 'for n in $(seq 1 30); do ok=1; for i in $(seq 0 15); do [ -e /dev/ttyMXUSB$i ] || ok=0; done; [ "$ok" = "1" ] && exit 0; sleep 1; done; exit 1'
+ExecStartPre=/bin/sh -c 'for n in $(seq 1 45); do ok=1; for i in $(seq 0 15); do [ -e /dev/ttyMXUSB$i ] || ok=0; done; [ "$ok" = "1" ] && exit 0; sleep 1; done; exit 1'
 
 # Critical Moxa-specific step: set each port to RS485 2-wire mode.  Without
 # this, setserial reports Port: 0x0000 (RS232) and the Wall Connector traffic
 # appears dead.
 ExecStartPre=/bin/sh -c 'for i in $(seq 0 15); do /bin/setserial /dev/ttyMXUSB$i port 0x1; done'
+
+# Fail fast if the first ports did not actually accept RS-485 2-wire mode.
+ExecStartPre=/bin/sh -c 'setserial -g /dev/ttyMXUSB0 /dev/ttyMXUSB1 /dev/ttyMXUSB2 /dev/ttyMXUSB3 | grep -q "Port: 0x0001"'
 
 ExecStart=/opt/twc-neurio-sim/twc_neurio_sim.py --quiet
 Restart=always

@@ -10,6 +10,7 @@ use it to control charging.
 | --- | --- |
 | `/api/1/vitals` | Detect a Wall Connector and read live charging status |
 | `/api/1/version` | Read serial number and firmware version |
+| `/api/1/lifetime` | Read lifetime counters during diagnostics |
 
 ## Discovery Logic
 
@@ -71,3 +72,18 @@ ip neigh: INCOMPLETE
 
 The web UI therefore keeps known chargers in `known_wall_connectors.json` and
 marks them offline rather than deleting them when Wi-Fi is temporarily bad.
+
+## Installation Current Limit
+
+In the observed firmware/API responses, these endpoints did not expose the
+configured installation maximum output current:
+
+```text
+/api/1/vitals
+/api/1/version
+/api/1/lifetime
+```
+
+The web UI therefore treats the Wall Connector's own configured max as an
+external setting/observation for now.  If a future firmware exposes it, it can
+be added to the device cards without changing the Modbus simulator.

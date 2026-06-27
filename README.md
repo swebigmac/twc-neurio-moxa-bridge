@@ -326,6 +326,41 @@ starts, the measured load rises, and the charger stops again.  Treat Fronius
 mode as a development/debug source until your control algorithm subtracts known
 charger current or otherwise filters the value safely.
 
+## Auto Load Control
+
+`Auto` mode is the first anti-hunting control loop.  It still uses the Fronius
+Smart Meter as the source, but it does not feed the raw Fronius current straight
+back to the Wall Connector.  Instead it:
+
+1. Reads total phase current from Fronius.
+2. Polls known Wall Connectors over `/api/1/vitals`.
+3. Subtracts Wall Connector charging current from the Fronius phase currents.
+4. Reports that synthetic non-charger load to the simulated Neurio registers.
+5. Adds a ramped overload penalty only when the real site current exceeds the
+   configured main fuse size.
+
+This keeps the Wall Connector from chasing its own current.  The main fuse and
+overload bands are stored in:
+
+```text
+/etc/twc-neurio-sim/control.json
+```
+
+Default control bands:
+
+| Real site load | Regulator response |
+| --- | --- |
+| `> 100.0%` | Ramp overload pressure within 600 s |
+| `> 110.0%` | Ramp overload pressure within 10 s |
+| `> 120.0%` | Ramp overload pressure within 1 s |
+
+The comparisons are exact floating point percentages, not rounded labels.  For
+example, `100.001%` is already in the slow overload band.
+
+Diazed main fuses normally tolerate moderate overload for a long time, so the
+default slow band is deliberately relaxed.  The fast band exists for clear
+fault/overload situations where the charger should be pushed down immediately.
+
 ## Observed Wall Connector Behavior
 
 With the Wall Connector configured for 16 A max:
@@ -365,6 +400,8 @@ Endpoints:
 | `/api/neurio` | POST | Write manual simulated values |
 | `/api/fronius` | GET | Read Fronius integration status/live meter values |
 | `/api/fronius` | POST | Configure Fronius Smart Meter integration |
+| `/api/control` | GET | Read automatic load-control settings/state |
+| `/api/control` | POST | Configure main fuse and overload response bands |
 | `/api/device-name` | POST | Save a human-friendly Wall Connector name |
 | `/api/identify/start` | POST | Start short-lived per-port current signatures for mapping experiments |
 

@@ -42,6 +42,7 @@ BAUD = 115200
 # this JSON file; the serial loop notices the mtime change and uses the values
 # for the next Modbus reply.
 CONFIG_PATH = Path("/etc/twc-neurio-sim/values.json")
+IDENTIFY_PATH = Path("/etc/twc-neurio-sim/identify.json")
 ACTIVITY_PATH = Path("/run/twc-neurio-sim/port_activity.json")
 NEURIO_SERIAL_PREFIX = "NEURIOMOXA"
 
@@ -78,6 +79,8 @@ DEFAULT_CURRENT_FLOATS = [1.0979, 3.7791, 0.4527, 0.0245]
 
 _last_config_mtime = None
 _cached_values = None
+_last_identify_mtime = None
+_cached_identify = None
 _last_activity_write = 0.0
 
 
@@ -160,6 +163,56 @@ def load_values() -> tuple[list[int], list[int]]:
         return floats_to_regs(DEFAULT_POWER_FLOATS), floats_to_regs(DEFAULT_CURRENT_FLOATS)
 
 
+def load_identify_overrides() -> dict[int, tuple[list[int], list[int]]]:
+    """Load short-lived per-port meter values for port identification.
+
+    identify.json is intentionally separate from values.json so the normal
+    load-balancing values remain untouched.  The web service can write entries
+    like:
+
+        {"ports": {"8": {"expires_at": 1234567890.0,
+                         "current_a": [8.08, 8.08, 8.08, 24.24],
+                         "power_w": [...]}}}
+
+    Expired or malformed entries are ignored.
+    """
+    global _last_identify_mtime, _cached_identify
+    try:
+        stat = IDENTIFY_PATH.stat()
+    except FileNotFoundError:
+        return {}
+
+    if _cached_identify is not None and _last_identify_mtime == stat.st_mtime_ns:
+        return _cached_identify
+
+    overrides = {}
+    now = time.time()
+    try:
+        data = json.loads(IDENTIFY_PATH.read_text())
+        for raw_port, item in (data.get("ports") or {}).items():
+            port_number = int(raw_port)
+            expires_at = float(item.get("expires_at", 0))
+            current = item.get("current_a", [])
+            power = item.get("power_w", [])
+            if expires_at <= now or len(current) != 4 or len(power) != 5:
+                continue
+            overrides[port_number] = (floats_to_regs(power), floats_to_regs(current))
+    except Exception as exc:
+        logging.warning("Could not load %s: %s; ignoring identify overrides", IDENTIFY_PATH, exc)
+        overrides = {}
+
+    _cached_identify = overrides
+    _last_identify_mtime = stat.st_mtime_ns
+    return overrides
+
+
+def load_values_for_port(port_number: int) -> tuple[list[int], list[int]]:
+    identify = load_identify_overrides()
+    if port_number in identify:
+        return identify[port_number]
+    return load_values()
+
+
 def crc16_modbus(data: bytes) -> bytes:
     """Return Modbus RTU CRC16 as two little-endian bytes."""
     crc = 0xFFFF
@@ -202,7 +255,7 @@ def response(slave: int, func: int, regs: list[int]) -> bytes:
     return body + crc16_modbus(body)
 
 
-def make_reply(frame: bytes, identity_regs: list[int]) -> bytes | None:
+def make_reply(frame: bytes, port_number: int, identity_regs: list[int]) -> bytes | None:
     """Return the simulator reply for one 8-byte Modbus RTU request.
 
     The Wall Connector requests observed so far are all function-code 3
@@ -227,7 +280,7 @@ def make_reply(frame: bytes, identity_regs: list[int]) -> bytes | None:
     if addr == 0x0000 and count == 1:
         return response(slave, func, [identity_regs[0]])
 
-    power_regs, current_regs = load_values()
+    power_regs, current_regs = load_values_for_port(port_number)
     if addr == 0x0088 and count == 10:
         return response(slave, func, power_regs)
     if addr == 0x00F4 and count == 8:
@@ -387,7 +440,7 @@ def main() -> int:
 
                     frame = bytes(state.buffer[:8])
                     del state.buffer[:8]
-                    reply = make_reply(frame, state.identity_regs)
+                    reply = make_reply(frame, state.port_number, state.identity_regs)
                     frame_hex = binascii.hexlify(frame, " ").decode()
 
                     if reply:

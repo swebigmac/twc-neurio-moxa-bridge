@@ -366,11 +366,19 @@ Endpoints:
 | `/api/fronius` | GET | Read Fronius integration status/live meter values |
 | `/api/fronius` | POST | Configure Fronius Smart Meter integration |
 | `/api/device-name` | POST | Save a human-friendly Wall Connector name |
+| `/api/identify/start` | POST | Start short-lived per-port current signatures for mapping experiments |
 
 The web UI reads `/run/twc-neurio-sim/port_activity.json`, which is written by
 the serial simulator.  This lets the UI show which physical Moxa ports are
 currently being polled over RS485 even before a Wall Connector has been mapped
 to that port.
+
+The dormant identification endpoint writes `/etc/twc-neurio-sim/identify.json`.
+For a short duration, the serial simulator then overrides normal Neurio values
+per port with recognizable signatures, for example Port 8 reports `8.08 A` on
+all three phases.  This is intended for future mapping work once a reliable
+HTTP/API or manual observation path can confirm which Wall Connector saw which
+signature.
 
 ## Credits
 

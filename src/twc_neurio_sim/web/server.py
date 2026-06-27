@@ -35,9 +35,11 @@ SCAN_TIMEOUT = 1.2
 MAX_WORKERS = 64
 KNOWN_DEVICES_PATH = "/etc/twc-neurio-sim/known_wall_connectors.json"
 VALUES_PATH = "/etc/twc-neurio-sim/values.json"
+IDENTIFY_PATH = "/etc/twc-neurio-sim/identify.json"
 FRONIUS_CONFIG_PATH = "/etc/twc-neurio-sim/fronius.json"
 PORT_ACTIVITY_PATH = "/run/twc-neurio-sim/port_activity.json"
 DEFAULT_VOLTAGE = 230.0
+DEFAULT_IDENTIFY_DURATION_S = 8
 MOXA_MODEL = "Moxa UPort 1650-16"
 MOXA_PORT_COUNT = 16
 PORT_ACTIVE_WINDOW_S = 10
@@ -196,6 +198,8 @@ INDEX_HTML = r'''<!doctype html>
     .tag.empty .dot { background: #a9abad; box-shadow: none; }
     .tag.rs485 { background: #eff8ed; color: #18820d; }
     .tag.rs485 .dot { background: var(--green); box-shadow: 0 0 0 4px rgba(18,189,0,.13); }
+    .tag.stale { background: #eeeeec; color: #6f7378; }
+    .tag.stale .dot { background: #a9abad; box-shadow: none; }
     .empty { padding: 28px 22px; color: var(--muted); border-top: 1px solid var(--line); }
     .debug { background: #111318; color: #d9dde7; border-radius: var(--radius); overflow: hidden; border: 1px solid #252933; }
     .debug-head { height: 44px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; background: #171a20; font-weight: 700; }
@@ -382,16 +386,18 @@ function serialConfigText(slot) {
   return `<div class="port-config ${config.ok === false ? 'bad' : ''}">Aktuell konfiguration: ${esc(text)}</div>`;
 }
 
-function deviceStatusText(d) {
+function deviceStatusText(d, active = true) {
   if (!d || (!d.occupied && !d.ip)) return 'Tom port';
   if (d.online === false) return 'Offline';
+  if (!active) return 'Ingen RS485';
   if (d.contactor_closed) return 'Charging';
   if (d.vehicle_connected) return 'Connected';
   return 'Online';
 }
 
-function deviceStatusClass(d) {
+function deviceStatusClass(d, active = true) {
   if (!d || (!d.occupied && !d.ip)) return 'empty';
+  if (d.online !== false && !active) return 'stale';
   return d.online === false ? 'offline' : '';
 }
 
@@ -425,12 +431,13 @@ function renderDevices(portsOrDevices) {
     }
     const displayName = d.display_name || '';
     const displayTitle = displayName ? esc(displayName) : 'Wall Connector';
+    const portConnectionText = active ? `ansluten till ${esc(portLabel)}` : `${esc(portLabel)} · ingen RS485-trafik`;
     return `
     <div class="${rowClasses.join(' ')}">
       <div>
         <div class="port-badge">Port ${d.moxa_port || slot.moxa_port || '-'}</div>
         <div class="wc-name">${displayTitle}${d.serial ? ' · ' + esc(d.serial) : ''}</div>
-        <div class="port-line">${d.serial ? esc(d.serial) + ' ansluten till ' : ''}${esc(portLabel)}</div>
+        <div class="port-line">${portConnectionText}</div>
         ${serialConfigText(slot)}
         <div class="wc-meta">${esc(d.ip)}${d.version ? ' · firmware ' + esc(d.version) : ''}${d.serial ? ' · ' + esc(d.serial) : ''}</div>
         ${statusMeta(d)}
@@ -442,7 +449,7 @@ function renderDevices(portsOrDevices) {
           <span class="metric"><b>${fmt(d.session_energy_wh)}</b> Wh session</span>
         </div>
       </div>
-      <div class="tag ${deviceStatusClass(d)}"><span class="dot"></span>${deviceStatusText(d)}</div>
+      <div class="tag ${deviceStatusClass(d, active)}"><span class="dot"></span>${deviceStatusText(d, active)}</div>
     </div>`;
   }).join('');
   bindDeviceNameInputs();
@@ -953,6 +960,59 @@ def save_neurio_values(payload):
     return data
 
 
+def identify_signature_for_port(port_number):
+    """Return a deliberately recognizable per-port current signature."""
+    current = round(port_number + port_number / 100.0, 2)
+    total = current * 3
+    return {
+        "current_a": [current, current, current, total],
+        "power_w": [current * DEFAULT_VOLTAGE, current * DEFAULT_VOLTAGE, current * DEFAULT_VOLTAGE, total * DEFAULT_VOLTAGE, 0.0],
+    }
+
+
+def start_identify_signatures(payload):
+    """Create short-lived per-port Neurio load signatures.
+
+    This is the safe half of future autodetection: the simulator can emit a
+    known value per RS485 port.  Matching that value back to a Wall Connector
+    still requires an observable API field or a manual/Tesla One observation.
+    """
+    duration_s = float(payload.get("duration_s", DEFAULT_IDENTIFY_DURATION_S))
+    duration_s = max(1.0, min(duration_s, 60.0))
+    ports_in = payload.get("ports")
+    if ports_in is None:
+        ports = list(range(1, MOXA_PORT_COUNT + 1))
+    elif isinstance(ports_in, list):
+        ports = [port for port in (normalized_moxa_port(item) for item in ports_in) if port is not None]
+    else:
+        raise ValueError("ports must be a list of Moxa port numbers")
+    if not ports:
+        raise ValueError("at least one valid port is required")
+
+    expires_at = time.time() + duration_s
+    data = {
+        "mode": "identify",
+        "duration_s": duration_s,
+        "expires_at": expires_at,
+        "ports": {},
+        "updated_at": iso_now(),
+    }
+    for port_number in ports:
+        signature = identify_signature_for_port(port_number)
+        data["ports"][str(port_number)] = {
+            "expires_at": expires_at,
+            **signature,
+        }
+
+    Path(IDENTIFY_PATH).parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = IDENTIFY_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    Path(tmp_path).replace(IDENTIFY_PATH)
+    return data
+
+
 def moxa_tty(port_number):
     """Return the Linux device name for a 1-based Moxa physical port."""
     return f"/dev/ttyMXUSB{port_number - 1}"
@@ -1315,6 +1375,15 @@ class Handler(BaseHTTPRequestHandler):
                 body = self.rfile.read(length) if length else b"{}"
                 payload = json.loads(body.decode("utf-8"))
                 self.send_json(200, save_device_name(payload))
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        if parsed.path == "/api/identify/start":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length) if length else b"{}"
+                payload = json.loads(body.decode("utf-8"))
+                self.send_json(200, start_identify_signatures(payload))
             except Exception as exc:
                 self.send_json(400, {"error": str(exc)})
             return
